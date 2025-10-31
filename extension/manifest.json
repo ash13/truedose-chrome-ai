@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Truth Dose",
-  "version": "1.0",
-  "description": "Fact-check health claims you see online with an AI tool based on research and community anecdotes.",
+  "version": "2.0",
+  "description": "Fact-check health claims using Chrome Built-in AI and peer-reviewed research from PubMed. Privacy-first, runs entirely on your device.",
   "permissions": [
     "contextMenus",
     "activeTab",
@@ -11,7 +11,7 @@
   ],
   "host_permissions": [
     "https://eutils.ncbi.nlm.nih.gov/*",
-    "https://www.reddit.com/*"
+    "https://api.semanticscholar.org/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -28,11 +28,5 @@
     "16": "TruthDose16.png",
     "48": "TruthDose48.png",
     "128": "TruthDose128.png"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": ["subreddit_database.csv","subreddits_with_embeddings.json"],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  }
 }
