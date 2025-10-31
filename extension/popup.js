@@ -1,0 +1,1572 @@
+// Health Fact Checker - Full Pipeline with Embeddings-Based Subreddit Discovery
+// Embeddings for paper reranking + Semantic Scholar + Reddit + AI Analysis
+
+// ===== CONFIG =====
+const API_BASE_URL = 'https://health-factcheck-server.vercel.app/api';
+
+// ===== EMBEDDINGS FOR RERANKING =====
+// Used to rerank papers and Reddit posts by semantic similarity
+
+function cosineSim(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a[i], y = b[i];
+    dot += x * y; na += x * x; nb += y * y;
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
+}
+
+async function embedQueryRemote(text) {
+  const EMBED_URL = 'https://health-factcheck-server.vercel.app/api/embed';
+  const r = await fetch(EMBED_URL, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ text })
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(()=>String(r.status));
+    throw new Error(`Query embedding failed: ${r.status} ${msg}`);
+  }
+  const { embedding } = await r.json();
+  if (!Array.isArray(embedding)) throw new Error('No embedding array in response');
+  return embedding;
+}
+
+// ===== UNUSED: SUBREDDIT DISCOVERY (commented out since we use global search now) =====
+/*
+async function loadSubredditEmbeddings() {
+  if (cachedEmbeddings) return cachedEmbeddings;
+  try {
+    const url = chrome.runtime.getURL('subreddits_with_embeddings.json');
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`Failed to load embeddings JSON: ${resp.status}`);
+    const data = await resp.json();
+    cachedEmbeddings = data.items;
+    console.log(`🔢 Loaded ${cachedEmbeddings.length} subreddit embeddings`);
+  } catch (e) {
+    console.error('Embedding DB load error:', e);
+    cachedEmbeddings = [];
+  }
+  return cachedEmbeddings;
+}
+
+async function discoverRelevantSubreddits(claim) {
+  console.time('  ⏱️  Subreddit Discovery');
+  const db = await loadSubredditEmbeddings();
+  if (!db.length) {
+    console.warn('No precomputed embeddings found. Using fallback subreddits.');
+    console.timeEnd('  ⏱️  Subreddit Discovery');
+    return [
+      { name: 'AskDocs', subscribers: 728209, description: 'Ask medical professionals', relevance: 1.0 },
+      { name: 'nutrition', subscribers: 5851322, description: 'Nutrition science discussion', relevance: 0.8 },
+      { name: 'Health', subscribers: 3588308, description: 'Health discussions', relevance: 0.6 }
+    ];
+  }
+
+  const qvec = await embedQueryRemote(claim);
+  const scored = db.map(item => ({
+    name: item.name,
+    subscribers: item.subscribers || 0,
+    description: item.description || '',
+    score: cosineSim(qvec, item.embedding),
+    relevance: 0
+  }));
+
+  scored.sort((a, b) => (b.score === a.score) ? (b.subscribers - a.subscribers) : (b.score - a.score));
+
+  const topSubreddits = scored.slice(0, 5).map(s => ({
+    name: s.name,
+    subscribers: s.subscribers,
+    description: s.description,
+    relevance: Math.max(0, Math.min(1, (s.score + 1) / 2))
+  }));
+
+  console.timeEnd('  ⏱️  Subreddit Discovery');
+  return topSubreddits;
+}
+*/
+
+// ===== PUBMED FUNCTIONS =====
+
+async function rephraseToMedicalQuery(claim) {
+  console.time('  ⏱️  OpenAI Rephrase API');
+  try {
+    const REPHRASE_URL = 'https://health-factcheck-server.vercel.app/api/rephrase';
+
+    const response = await fetch(REPHRASE_URL, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ claim })
+    });
+
+    if (!response.ok) {
+      const msg = await response.text().catch(() => String(response.status));
+      throw new Error(`Rephrasing failed: ${response.status} ${msg}`);
+    }
+
+    const { query } = await response.json();
+
+    if (!query || typeof query !== 'string') {
+      throw new Error('No query returned from API');
+    }
+
+    const cleaned = query.trim();
+
+    console.log(`🔬 Original: "${claim}"`);
+    console.log(`🔬 Rephrased via OpenAI: "${cleaned}"`);
+    console.timeEnd('  ⏱️  OpenAI Rephrase API');
+    return cleaned;
+
+  } catch (error) {
+    console.error('Error rephrasing via OpenAI API:', error);
+    // Fallback: remove common words
+    const fallback = claim.split(' ')
+      .filter(word => word.length > 3 && !['should', 'people', 'avoid', 'have', 'with', 'that', 'this', 'could', 'would', 'every', 'always', 'never'].includes(word.toLowerCase()))
+      .slice(0, 5)
+      .join(' ');
+
+    console.log(`⚠️ Using fallback keywords: "${fallback}"`);
+    return fallback;
+  }
+}
+
+// Search PubMed for medical papers
+async function searchPubMed(medicalQuery) {
+  try {
+    const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(medicalQuery)}&retmax=10&retmode=json&sort=relevance`;
+
+    const searchResponse = await fetch(searchUrl);
+    const searchData = await searchResponse.json();
+    const pmids = searchData.esearchresult.idlist;
+
+    if (pmids.length === 0) {
+      return [];
+    }
+
+    console.log(`  ✓ Found ${pmids.length} papers from PubMed`);
+
+    // Get paper metadata
+    const summaryUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${pmids.join(',')}&retmode=json`;
+    const summaryResponse = await fetch(summaryUrl);
+    const summaryData = await summaryResponse.json();
+
+    const papers = pmids.map(id => {
+      const paper = summaryData.result[id];
+
+      // Clean DOI - remove "doi: " prefix if present
+      let doi = paper.elocationid || paper.articleids?.find(id => id.idtype === 'doi')?.value || null;
+      if (doi && doi.toLowerCase().startsWith('doi:')) {
+        doi = doi.substring(4).trim();
+      }
+
+      return {
+        title: paper.title,
+        authors: paper.authors?.slice(0, 3).map(a => a.name).join(', ') || 'Unknown',
+        journal: paper.fulljournalname || paper.source,
+        year: paper.pubdate?.split(' ')[0] || 'Unknown',
+        pmid: id,
+        doi: doi,
+        url: `https://pubmed.ncbi.nlm.nih.gov/${id}/`,
+        source: 'pubmed'
+      };
+    });
+
+    return papers;
+  } catch (error) {
+    console.error('PubMed search error:', error);
+    return [];
+  }
+}
+
+// Search Semantic Scholar
+async function searchSemanticScholar(medicalQuery) {
+  try {
+    const searchUrl = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(medicalQuery)}&fields=title,abstract,authors,year,citationCount,influentialCitationCount,venue,externalIds,url&limit=10`;
+
+    const searchResponse = await fetch(searchUrl);
+
+    if (!searchResponse.ok) {
+      if (searchResponse.status === 429) {
+        console.warn('⚠️  Semantic Scholar rate limit reached - continuing with PubMed only');
+        return [];
+      }
+      throw new Error(`Semantic Scholar API error: ${searchResponse.status}`);
+    }
+
+    const searchData = await searchResponse.json();
+    const results = searchData.data || [];
+
+    if (results.length === 0) {
+      return [];
+    }
+
+    console.log(`  ✓ Found ${results.length} papers from Semantic Scholar`);
+
+    const papers = results
+      .filter(paper => paper.abstract)
+      .map(paper => ({
+        title: paper.title,
+        authors: paper.authors?.slice(0, 3).map(a => a.name).join(', ') || 'Unknown',
+        journal: paper.venue || 'Unknown',
+        year: paper.year?.toString() || 'Unknown',
+        citations: paper.citationCount || 0,
+        influentialCitations: paper.influentialCitationCount || 0,
+        paperId: paper.paperId,
+        abstract: paper.abstract,
+        url: paper.url || `https://www.semanticscholar.org/paper/${paper.paperId}`,
+        doi: paper.externalIds?.DOI || null,
+        pmid: paper.externalIds?.PubMed || null,
+        source: 'semantic_scholar'
+      }));
+
+    return papers;
+  } catch (error) {
+    console.warn('⚠️  Semantic Scholar unavailable - continuing with PubMed only:', error.message);
+    return [];
+  }
+}
+
+// Enrich PubMed papers with citation data from Semantic Scholar
+async function enrichPubMedWithCitations(pubmedPapers) {
+  console.log(`  🔗 Enriching ${pubmedPapers.length} PubMed papers with citation data...`);
+
+  const enrichedPapers = await Promise.all(
+    pubmedPapers.map(async (paper) => {
+      try {
+        // Try to find paper on Semantic Scholar by DOI or PMID
+        let s2Data = null;
+
+        if (paper.doi) {
+          try {
+            const doiUrl = `https://api.semanticscholar.org/graph/v1/paper/DOI:${paper.doi}?fields=abstract,citationCount,influentialCitationCount`;
+            const response = await fetch(doiUrl);
+            if (response.ok) {
+              s2Data = await response.json();
+            } else if (response.status === 429) {
+              console.warn(`  ⚠️  Rate limited on DOI lookup for ${paper.title.substring(0, 50)}...`);
+            }
+          } catch (e) {
+            // Silently fail on network errors
+          }
+        }
+
+        if (!s2Data && paper.pmid) {
+          try {
+            const pmidUrl = `https://api.semanticscholar.org/graph/v1/paper/PMID:${paper.pmid}?fields=abstract,citationCount,influentialCitationCount`;
+            const response = await fetch(pmidUrl);
+            if (response.ok) {
+              s2Data = await response.json();
+            } else if (response.status === 429) {
+              console.warn(`  ⚠️  Rate limited on PMID lookup`);
+            }
+          } catch (e) {
+            // Silently fail on network errors
+          }
+        }
+
+        if (s2Data) {
+          return {
+            ...paper,
+            citations: s2Data.citationCount || 0,
+            influentialCitations: s2Data.influentialCitationCount || 0,
+            abstract: s2Data.abstract || paper.abstract,
+            paperId: s2Data.paperId
+          };
+        }
+
+        return { ...paper, citations: 0, influentialCitations: 0 };
+      } catch (error) {
+        // Silently handle errors - not critical to have citation counts
+        return { ...paper, citations: 0, influentialCitations: 0 };
+      }
+    })
+  );
+
+  console.log(`  ✓ Enrichment complete`);
+  return enrichedPapers;
+}
+
+// Fetch abstracts for papers missing them
+async function fetchMissingAbstracts(papers) {
+  const papersNeedingAbstracts = papers.filter(p => !p.abstract && p.pmid);
+
+  if (papersNeedingAbstracts.length === 0) {
+    return papers;
+  }
+
+  console.log(`Fetching ${papersNeedingAbstracts.length} missing abstracts from PubMed...`);
+
+  for (const paper of papersNeedingAbstracts) {
+    try {
+      const fetchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${paper.pmid}&retmode=xml`;
+      const response = await fetch(fetchUrl);
+      const xmlText = await response.text();
+
+      const abstractMatch = xmlText.match(/<AbstractText[^>]*>([\s\S]*?)<\/AbstractText>/g);
+      if (abstractMatch) {
+        const abstractParts = abstractMatch.map(tag => tag.replace(/<[^>]+>/g, '').trim());
+        paper.abstract = abstractParts.join(' ');
+      }
+    } catch (error) {
+      console.warn(`Could not fetch abstract for ${paper.pmid}`);
+    }
+  }
+
+  return papers;
+}
+
+// Hybrid search: PubMed + Semantic Scholar
+async function searchHybrid(query) {
+  try {
+    // Rephrase to medical/scientific language
+    const medicalQuery = await rephraseToMedicalQuery(query);
+
+    console.log(`Searching PubMed + Semantic Scholar with: "${medicalQuery}"`);
+
+    // Search both in parallel
+    const [pubmedPapers, semanticPapers] = await Promise.all([
+      searchPubMed(medicalQuery),
+      searchSemanticScholar(medicalQuery)
+    ]);
+
+    if (pubmedPapers.length === 0 && semanticPapers.length === 0) {
+      console.log('No papers found from either source');
+      return { papers: [], count: 0, medicalQuery: medicalQuery };
+    }
+
+    // Enrich PubMed papers with citation data from Semantic Scholar
+    const enrichedPubMed = await enrichPubMedWithCitations(pubmedPapers);
+
+    // Merge papers (deduplicate by DOI or title)
+    const allPapers = [...semanticPapers];
+    const seenDOIs = new Set(semanticPapers.map(p => p.doi).filter(Boolean));
+    const seenTitles = new Set(semanticPapers.map(p => p.title.toLowerCase()));
+
+    for (const paper of enrichedPubMed) {
+      const isDuplicate =
+        (paper.doi && seenDOIs.has(paper.doi)) ||
+        seenTitles.has(paper.title.toLowerCase());
+
+      if (!isDuplicate) {
+        allPapers.push(paper);
+        if (paper.doi) seenDOIs.add(paper.doi);
+        seenTitles.add(paper.title.toLowerCase());
+      }
+    }
+
+    console.log(`Total: ${allPapers.length} unique papers (${pubmedPapers.length} PubMed, ${semanticPapers.length} Semantic Scholar)`);
+
+    // Fetch missing abstracts
+    await fetchMissingAbstracts(allPapers);
+
+    // Filter out papers without abstracts
+    const papersWithAbstracts = allPapers.filter(p => p.abstract);
+    console.log(`${papersWithAbstracts.length} papers have abstracts`);
+
+    // Rank by quality score: influential citations + recency
+    console.log(`Ranking by influential citations and recency...`);
+    const rankedPapers = rankPapersByQualityScore(papersWithAbstracts);
+
+    // Extract study metadata for top 5 papers
+    const top5Papers = rankedPapers.slice(0, 5);
+    const papersWithMetadata = await extractStudyMetadata(top5Papers);
+
+    console.log(`Returning top ${papersWithMetadata.length} papers with metadata`);
+    return {
+      papers: papersWithMetadata,
+      count: papersWithMetadata.length,
+      medicalQuery: medicalQuery
+    };
+
+  } catch (error) {
+    console.error('Hybrid search error:', error);
+    return { papers: [], count: 0, medicalQuery: query, error: error.message };
+  }
+}
+
+// Rank papers by quality score: influential citations + recency
+// No embedding re-ranking needed - APIs already returned relevant papers
+function rankPapersByQualityScore(papers) {
+  const currentYear = new Date().getFullYear();
+
+  // Calculate quality score for each paper
+  const scoredPapers = papers.map((paper) => {
+    // Recency score (favor papers from last 10 years)
+    const yearInt = parseInt(paper.year) || currentYear;
+    const age = currentYear - yearInt;
+    const recencyScore = Math.max(0, 1 - (age / 20)); // 1.0 for this year, 0.5 for 10 years, 0.0 for 20+ years
+
+    // Influential citation score (normalize by log scale)
+    // Use influential citations (better than raw citations - filters self-citations & citation farms)
+    const influentialCount = paper.influentialCitations || 0;
+    const influentialScore = Math.log10(influentialCount + 1) / 3.5; // log10(3162) ≈ 3.5, so 3k+ influential = 1.0
+
+    // Quality score: focus on what matters for fact-checking
+    const qualityScore =
+      (influentialScore * 0.6) +  // 60% - Influential citations (peer validation)
+      (recencyScore * 0.4);        // 40% - Recency (current knowledge)
+
+    return {
+      ...paper,
+      recencyScore,
+      influentialScore,
+      qualityScore
+    };
+  });
+
+  // Sort by quality score
+  scoredPapers.sort((a, b) => b.qualityScore - a.qualityScore);
+
+  // Log top 5 for debugging
+  console.log('Top 5 papers by quality score:');
+  scoredPapers.slice(0, 5).forEach((paper, idx) => {
+    console.log(`    ${idx + 1}. [${paper.source}] ${paper.title.substring(0, 60)}...`);
+    console.log(`       Influential: ${paper.influentialCitations} | Total: ${paper.citations} | Year: ${paper.year} | Quality: ${paper.qualityScore.toFixed(3)}`);
+  });
+
+  return scoredPapers;
+}
+
+// ===== UNUSED: Embedding-based paper reranking (no longer needed) =====
+// Removed because APIs already return relevant papers, so we rank by quality instead
+/*
+async function rerankPapersByEmbeddings(claim, papers) {
+  try {
+    console.log(`🧠 Embedding claim + ${papers.length} paper titles in parallel...`);
+    console.time('  ⏱️  Embedding API Calls (parallel)');
+
+    const embeddingPromises = [
+      embedQueryRemote(claim),
+      ...papers.map(paper => embedQueryRemote(paper.title))
+    ];
+
+    const allEmbeddings = await Promise.all(embeddingPromises);
+    console.timeEnd('  ⏱️  Embedding API Calls (parallel)');
+
+    const claimEmbedding = allEmbeddings[0];
+    const titleEmbeddings = allEmbeddings.slice(1);
+
+    const scoredPapers = papers.map((paper, idx) => ({
+      ...paper,
+      relevanceScore: cosineSim(claimEmbedding, titleEmbeddings[idx])
+    }));
+
+    scoredPapers.sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+    return scoredPapers;
+  } catch (error) {
+    console.error('Error reranking papers:', error);
+    return papers;
+  }
+}
+*/
+
+async function fetchAbstracts(papers) {
+  // With Semantic Scholar, abstracts are already included in search results!
+  // Just format them for the summarize function
+  console.log(`Using abstracts from Semantic Scholar (no additional fetching needed)`);
+
+  return papers.map(paper => ({
+    paperId: paper.paperId,
+    title: paper.title,
+    abstract: paper.abstract
+  }));
+}
+
+// Extract study metadata (demographics + statistical significance) from abstracts
+async function extractStudyMetadata(papers) {
+  console.log(`Extracting study metadata for ${papers.length} papers...`);
+  console.time('Metadata Extraction');
+
+  try {
+    // Extract metadata for all papers in parallel
+    const metadataPromises = papers.map(async (paper) => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/extract-metadata`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            abstract: paper.abstract,
+            title: paper.title
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error(`Metadata extraction failed: ${response.status}`);
+        }
+
+        const metadata = await response.json();
+        return {
+          ...paper,
+          studyMetadata: metadata
+        };
+      } catch (error) {
+        console.warn(`Could not extract metadata for "${paper.title}":`, error.message);
+        return {
+          ...paper,
+          studyMetadata: null
+        };
+      }
+    });
+
+    const enrichedPapers = await Promise.all(metadataPromises);
+    console.timeEnd('Metadata Extraction');
+
+    return enrichedPapers;
+  } catch (error) {
+    console.error('Metadata extraction error:', error);
+    return papers; // Return papers without metadata if extraction fails
+  }
+}
+
+// ===== REDDIT FUNCTIONS =====
+
+function extractSearchTerms(claim) {
+  return claim.split(' ')
+    .filter(word => word.length > 3)
+    .slice(0, 3)
+    .join(' ');
+}
+
+function calculatePostRelevance(postData, claim) {
+  const title = postData.title.toLowerCase();
+  const text = postData.selftext.toLowerCase();
+  const claimLower = claim.toLowerCase();
+
+  let relevance = 0;
+  const claimWords = claimLower.split(' ').filter(word => word.length > 3);
+
+  for (const word of claimWords) {
+    if (title.includes(word)) relevance += 2;
+    if (text.includes(word)) relevance += 1;
+  }
+
+  return relevance / claimWords.length;
+}
+
+// OLD: Search within each subreddit separately (KEPT AS BACKUP)
+// To switch back, replace fetchRedditDataGlobal calls with fetchRedditData
+async function fetchRedditData(claim, subreddits, medicalKeywords) {
+  const redditPosts = [];
+  // Use medical keywords if provided, otherwise fall back to extraction
+  const searchTerms = medicalKeywords || extractSearchTerms(claim);
+
+  console.log(`Search terms for Reddit: "${searchTerms}"`);
+
+  for (const subreddit of subreddits) {
+    try {
+      console.log(`Fetching from r/${subreddit.name}...`);
+      const searchUrl = `https://www.reddit.com/r/${subreddit.name}/search.json?q=${encodeURIComponent(searchTerms)}&restrict_sr=1&sort=relevance&limit=15`;
+      const response = await fetch(searchUrl);
+      const data = await response.json();
+
+      if (data.data && data.data.children) {
+        const postCount = data.data.children.length;
+        console.log(`     ✓ Found ${postCount} posts in r/${subreddit.name}`);
+
+        data.data.children.forEach(post => {
+          const postData = post.data;
+          redditPosts.push({
+            subreddit: subreddit.name,
+            title: postData.title,
+            selftext: postData.selftext,
+            score: postData.score,
+            num_comments: postData.num_comments,
+            created_utc: postData.created_utc,
+            url: `https://www.reddit.com${postData.permalink}`,
+            relevance_score: calculatePostRelevance(postData, claim)
+          });
+        });
+      } else {
+        console.log(`No posts found in r/${subreddit.name}`);
+      }
+    } catch (error) {
+      console.error(`Error fetching from r/${subreddit.name}:`, error.message);
+    }
+  }
+
+  console.log(`\n Total posts collected: ${redditPosts.length}`);
+
+  // Rerank by embedding similarity (like papers)
+  const rankedPosts = await rerankRedditPostsByEmbeddings(claim, redditPosts);
+
+  console.log(`Top ${Math.min(8, rankedPosts.length)} most relevant posts selected\n`);
+
+  return rankedPosts.slice(0, 8);
+}
+
+// Global Reddit search (searches all of Reddit, no subreddit filtering)
+async function fetchRedditDataGlobal(claim, medicalKeywords) {
+  // Use medical keywords if provided, otherwise fall back to extraction
+  const searchTerms = medicalKeywords || extractSearchTerms(claim);
+
+  // Add experience-focused keywords to find personal stories, not questions
+  // Exclude "why" and "how" questions, prefer "I" statements
+  const experienceQuery = `${searchTerms} (selftext:I OR selftext:my OR selftext:experience) -title:why -title:how -title:what`;
+
+  console.log(`Search terms for Reddit: "${searchTerms}"`);
+  console.log(`Experience-focused query: "${experienceQuery}"`);
+  console.log(`Searching globally across all of Reddit...`);
+
+  try {
+    // Global Reddit search (like the search bar) - get 25 posts
+    // Use experience-focused query to find discussion posts, not questions
+    const searchUrl = `https://www.reddit.com/search.json?q=${encodeURIComponent(experienceQuery)}&sort=comments&limit=25`;
+    const response = await fetch(searchUrl);
+    const data = await response.json();
+
+    if (!data.data || !data.data.children) {
+      console.log('No results from global search');
+      return [];
+    }
+
+    const allPosts = data.data.children;
+    console.log(`Found ${allPosts.length} posts globally`);
+
+    // Convert to our format (NO filtering by subreddit - let embeddings decide!)
+    const redditPosts = allPosts.map(post => {
+      const postData = post.data;
+      return {
+        subreddit: postData.subreddit,
+        title: postData.title,
+        selftext: postData.selftext,
+        score: postData.score,
+        num_comments: postData.num_comments,
+        created_utc: postData.created_utc,
+        url: `https://www.reddit.com${postData.permalink}`,
+        relevance_score: calculatePostRelevance(postData, claim)
+      };
+    });
+
+    // Show breakdown by subreddit
+    const subredditCounts = {};
+    redditPosts.forEach(post => {
+      subredditCounts[post.subreddit] = (subredditCounts[post.subreddit] || 0) + 1;
+    });
+    console.log(`Posts by subreddit:`);
+    Object.entries(subredditCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .forEach(([sub, count]) => {
+        console.log(`     • r/${sub}: ${count} posts`);
+      });
+
+    console.log(`\nTotal posts collected: ${redditPosts.length}`);
+
+    // Rerank by embedding similarity (like papers)
+    const rankedPosts = await rerankRedditPostsByEmbeddings(claim, redditPosts);
+
+    console.log(`Top ${Math.min(8, rankedPosts.length)} most relevant posts selected\n`);
+
+    return rankedPosts.slice(0, 8);
+
+  } catch (error) {
+    console.error('Error in global Reddit search:', error);
+    return [];
+  }
+}
+
+async function fetchCommentsForPost(post) {
+  try {
+    // Extract post ID from URL: /r/subreddit/comments/POST_ID/title
+    const postIdMatch = post.url.match(/\/comments\/([a-z0-9]+)\//);
+    if (!postIdMatch) return [];
+
+    const postId = postIdMatch[1];
+    const commentsUrl = `https://www.reddit.com/r/${post.subreddit}/comments/${postId}.json?limit=10&sort=top`;
+
+    const response = await fetch(commentsUrl);
+    const data = await response.json();
+
+    if (!data || data.length < 2) return [];
+
+    // Reddit API returns [post_data, comments_data]
+    const commentsData = data[1];
+    if (!commentsData.data || !commentsData.data.children) return [];
+
+    // Extract top comments (filter out stickied/automod)
+    const comments = commentsData.data.children
+      .filter(comment => comment.kind === 't1' && comment.data.body && !comment.data.stickied)
+      .slice(0, 5) // Top 5 comments
+      .map(comment => ({
+        body: comment.data.body,
+        score: comment.data.score
+      }));
+
+    return comments;
+
+  } catch (error) {
+    console.error(`Error fetching comments for ${post.title}:`, error.message);
+    return [];
+  }
+}
+
+async function rerankRedditPostsByEmbeddings(claim, posts) {
+  if (posts.length === 0) return [];
+
+  try {
+    console.log(`Reranking ${posts.length} Reddit posts by semantic similarity...`);
+    console.time('Embedding Reddit Posts (parallel)');
+
+    // Embed claim + all post titles in parallel
+    const embeddingPromises = [
+      embedQueryRemote(claim),
+      ...posts.map(post => embedQueryRemote(post.title))
+    ];
+
+    const allEmbeddings = await Promise.all(embeddingPromises);
+    console.timeEnd('Embedding Reddit Posts (parallel)');
+
+    const claimEmbedding = allEmbeddings[0];
+    const postEmbeddings = allEmbeddings.slice(1);
+
+    // Calculate similarity scores
+    const scoredPosts = posts.map((post, idx) => ({
+      ...post,
+      similarityScore: cosineSim(claimEmbedding, postEmbeddings[idx])
+    }));
+
+    // Sort by similarity (highest first)
+    scoredPosts.sort((a, b) => b.similarityScore - a.similarityScore);
+
+    console.log('Top Reddit post similarities:');
+    scoredPosts.slice(0, 8).forEach((post, idx) => {
+      console.log(`  ${idx + 1}. ${(post.similarityScore * 100).toFixed(1)}% - ${post.title.substring(0, 60)}...`);
+    });
+
+    return scoredPosts;
+
+  } catch (error) {
+    console.error('Error reranking Reddit posts:', error);
+    // Fallback: return posts in original order
+    return posts;
+  }
+}
+
+async function analyzeCommunitySentiment(redditPosts, claim) {
+  if (redditPosts.length === 0) {
+    return {
+      positive: 0,
+      negative: 0,
+      neutral: 0,
+      confidence: 0,
+      sample_size: 0,
+      experiences: []
+    };
+  }
+
+  try {
+    const postsToAnalyze = redditPosts.slice(0, 5);
+    const UPVOTE_THRESHOLD = 2; // Minimum upvotes to include comment
+
+    // Fetch comments for each post in parallel
+    console.log(`Fetching comments for ${postsToAnalyze.length} posts...`);
+    console.time(' Fetch Comments');
+    const commentPromises = postsToAnalyze.map(post => fetchCommentsForPost(post));
+    const allComments = await Promise.all(commentPromises);
+    console.timeEnd('Fetch Comments');
+
+    // Flatten all comments and filter by upvote threshold
+    const flattenedComments = [];
+    postsToAnalyze.forEach((post, idx) => {
+      const postComments = allComments[idx] || [];
+      postComments.forEach(comment => {
+        if (comment.score >= UPVOTE_THRESHOLD) {
+          flattenedComments.push({
+            body: comment.body,
+            score: comment.score,
+            post_title: post.title,
+            subreddit: post.subreddit
+          });
+        }
+      });
+    });
+
+    const totalComments = allComments.reduce((sum, comments) => sum + comments.length, 0);
+    console.log(`Fetched ${totalComments} comments total`);
+    console.log(`Filtered to ${flattenedComments.length} comments with ≥${UPVOTE_THRESHOLD} upvotes`);
+
+    if (flattenedComments.length === 0) {
+      console.log('No comments meet upvote threshold');
+      return {
+        positive: 0,
+        negative: 0,
+        neutral: 1,
+        confidence: 0,
+        sample_size: 0,
+        experiences: []
+      };
+    }
+
+    // Log the actual comments being analyzed for debugging
+    console.log(`\nCOMMENTS BEING ANALYZED:`);
+    console.log('='.repeat(80));
+    flattenedComments.forEach((comment, idx) => {
+      console.log(`\nCOMMENT ${idx + 1}:`);
+      console.log(`  From: r/${comment.subreddit} - "${comment.post_title.substring(0, 60)}..."`);
+      console.log(`  Upvotes: ${comment.score}`);
+      console.log(`  Text: ${comment.body.substring(0, 300)}${comment.body.length > 300 ? '...' : ''}`);
+    });
+    console.log('='.repeat(80) + '\n');
+
+    console.log(`Analyzing ${flattenedComments.length} individual comments via OpenAI...`);
+
+    // Call OpenAI API with individual comments
+    const response = await fetch(`${API_BASE_URL}/analyze-sentiment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ claim, comments: flattenedComments })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Sentiment analysis failed: ${response.status}`);
+    }
+
+    const { results } = await response.json();
+
+    // Count sentiments across ALL comments
+    let positive = 0, negative = 0, neutral = 0;
+    const sentimentResults = results.map((result, idx) => {
+      const sentiment = result.sentiment || 'NEUTRAL';
+
+      // Aggregate counts
+      switch (sentiment) {
+        case 'POSITIVE': positive++; break;
+        case 'NEGATIVE': negative++; break;
+        default: neutral++; break;
+      }
+
+      return {
+        sentiment,
+        confidence: result.confidence || 0.5,
+        comment_preview: flattenedComments[idx].body.substring(0, 100),
+        score: flattenedComments[idx].score,
+        subreddit: flattenedComments[idx].subreddit,
+        post_title: flattenedComments[idx].post_title
+      };
+    });
+
+    const total = positive + negative + neutral;
+    const confidence = Math.min(total / 10, 1.0); // Confidence based on sample size
+
+    console.log(`Sentiment breakdown: ${positive} positive, ${negative} negative, ${neutral} neutral`);
+
+    return {
+      positive: positive / total,
+      negative: negative / total,
+      neutral: neutral / total,
+      confidence: confidence,
+      sample_size: total,
+      experiences: sentimentResults,
+      raw_posts: redditPosts.length
+    };
+
+  } catch (error) {
+    console.error('Error analyzing community sentiment:', error);
+    return {
+      positive: 0,
+      negative: 0,
+      neutral: 1,
+      confidence: 0,
+      sample_size: 0,
+      experiences: []
+    };
+  }
+}
+
+function calculateProbabilityScore(pubmedResults, communitySentiment, claim) {
+  const RESEARCH_WEIGHT = 0.7;
+  const COMMUNITY_WEIGHT = 0.3;
+
+  let researchScore = 0.5;
+  let researchBreakdown = { positive: 0, negative: 0, neutral: 0 };
+
+  // NEW: Quality-weighted research score based on paper sentiments
+  if (pubmedResults.papers && pubmedResults.papers.length > 0) {
+    const papersWithSentiment = pubmedResults.papers.filter(p => p.paperSentiment);
+
+    if (papersWithSentiment.length > 0) {
+      // Calculate total quality weight
+      const totalQualityWeight = papersWithSentiment.reduce((sum, paper) => {
+        return sum + (paper.qualityScore || 0.5);
+      }, 0);
+
+      // Calculate weighted sentiment scores
+      let weightedPositive = 0;
+      let weightedNegative = 0;
+      let weightedNeutral = 0;
+
+      papersWithSentiment.forEach(paper => {
+        const weight = (paper.qualityScore || 0.5) / totalQualityWeight;
+        const confidence = paper.paperSentiment.confidence || 0.5;
+
+        if (paper.paperSentiment.sentiment === 'POSITIVE') {
+          weightedPositive += weight * confidence;
+        } else if (paper.paperSentiment.sentiment === 'NEGATIVE') {
+          weightedNegative += weight * confidence;
+        } else {
+          weightedNeutral += weight * confidence;
+        }
+      });
+
+      // Calculate research score based on weighted sentiments
+      // POSITIVE = supports claim (score > 0.5)
+      // NEGATIVE = contradicts claim (score < 0.5)
+      // NEUTRAL = unclear (score = 0.5)
+
+      if (weightedPositive > weightedNegative) {
+        // More papers support the claim
+        researchScore = 0.5 + (weightedPositive * 0.4); // Range: [0.5, 0.9]
+      } else if (weightedNegative > weightedPositive) {
+        // More papers contradict the claim
+        researchScore = 0.5 - (weightedNegative * 0.4); // Range: [0.1, 0.5]
+      } else {
+        // Equal or all neutral
+        researchScore = 0.5;
+      }
+
+      // Apply sample size confidence boost
+      const sampleConfidence = Math.min(papersWithSentiment.length / 5, 1.0);
+      researchScore = researchScore + (sampleConfidence * 0.1 * (researchScore > 0.5 ? 1 : -1));
+
+      researchBreakdown = {
+        positive: Math.round(weightedPositive * 100),
+        negative: Math.round(weightedNegative * 100),
+        neutral: Math.round(weightedNeutral * 100)
+      };
+
+      console.log(`📊 Research sentiment: ${researchBreakdown.positive}% positive, ${researchBreakdown.negative}% negative, ${researchBreakdown.neutral}% neutral`);
+      console.log(`📈 Research score: ${(researchScore * 100).toFixed(1)}% (quality-weighted)`);
+    } else {
+      // Fallback to old count-based method if no sentiment analysis
+      const paperConfidence = Math.min(pubmedResults.count / 5, 1.0);
+      researchScore = 0.6 + (paperConfidence * 0.3);
+      console.log(`⚠️  No paper sentiment data, using count-based score: ${(researchScore * 100).toFixed(1)}%`);
+    }
+  }
+
+  let communityScore = 0.5;
+  if (communitySentiment.sample_size > 0) {
+    if (communitySentiment.positive > communitySentiment.negative) {
+      communityScore = 0.3 + (communitySentiment.positive * 0.5);
+    } else if (communitySentiment.negative > communitySentiment.positive) {
+      communityScore = 0.5 - (communitySentiment.negative * 0.3);
+    }
+    communityScore *= communitySentiment.confidence;
+  }
+
+  const finalScore = (researchScore * RESEARCH_WEIGHT) + (communityScore * COMMUNITY_WEIGHT);
+
+  let confidence = 0.5;
+  if (pubmedResults.count > 0) confidence += 0.3;
+  if (communitySentiment.sample_size > 3) confidence += 0.2;
+  confidence = Math.min(confidence, 1.0);
+
+  return {
+    probability: Math.round(finalScore * 100),
+    confidence: Math.round(confidence * 100),
+    research_contribution: Math.round(researchScore * RESEARCH_WEIGHT * 100),
+    community_contribution: Math.round(communityScore * COMMUNITY_WEIGHT * 100),
+    research_papers: pubmedResults.count,
+    community_posts: communitySentiment.sample_size,
+    breakdown: {
+      research_score: Math.round(researchScore * 100),
+      community_score: Math.round(communityScore * 100),
+      research_positive: researchBreakdown.positive,
+      research_negative: researchBreakdown.negative,
+      research_neutral: researchBreakdown.neutral,
+      community_positive: Math.round(communitySentiment.positive * 100),
+      community_negative: Math.round(communitySentiment.negative * 100),
+      community_neutral: Math.round(communitySentiment.neutral * 100)
+    }
+  };
+}
+
+// ===== AI PROCESSING FUNCTIONS =====
+
+async function summarizeAbstracts(abstracts) {
+  if (abstracts.length === 0) return [];
+
+  // Parallelize all summarization calls to OpenAI API
+  console.log(`Summarizing ${abstracts.length} abstracts via OpenAI...`);
+  const summaryPromises = abstracts.map(async (item) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/summarize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: item.abstract })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Summarization failed: ${response.status}`);
+      }
+
+      const { summary } = await response.json();
+      return {
+        pmid: item.pmid,
+        title: item.title,
+        summary: summary
+      };
+    } catch (error) {
+      console.error(`Error summarizing ${item.pmid}:`, error);
+      return {
+        pmid: item.pmid,
+        title: item.title,
+        summary: item.abstract.substring(0, 200) + '...'
+      };
+    }
+  });
+
+  return await Promise.all(summaryPromises);
+}
+
+// Analyze whether papers support or contradict the claim
+async function analyzePapers(claim, papers) {
+  if (papers.length === 0) return papers;
+
+  try {
+    console.log(`🔬 Analyzing ${papers.length} papers against claim...`);
+
+    const response = await fetch(`${API_BASE_URL}/analyze-papers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        claim,
+        papers: papers.map(p => ({
+          title: p.title,
+          summary: p.summary,
+          abstract: p.abstract,
+          studyMetadata: p.studyMetadata
+        }))
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Paper analysis failed: ${response.status}`);
+    }
+
+    const { results } = await response.json();
+
+    // Attach sentiment to each paper
+    const papersWithSentiment = papers.map((paper, idx) => {
+      const sentiment = results[idx] || { sentiment: 'NEUTRAL', confidence: 0.5, reason: 'Analysis failed' };
+      return {
+        ...paper,
+        paperSentiment: sentiment
+      };
+    });
+
+    console.log(`✅ Paper analysis complete`);
+    papersWithSentiment.forEach((paper, idx) => {
+      console.log(`  ${idx + 1}. ${paper.paperSentiment.sentiment} (${(paper.paperSentiment.confidence * 100).toFixed(0)}%) - ${paper.title.substring(0, 60)}...`);
+    });
+
+    return papersWithSentiment;
+  } catch (error) {
+    console.error('Error analyzing papers:', error);
+    // Return papers without sentiment analysis (fallback)
+    return papers;
+  }
+}
+
+// REMOVED: simplifyText function - summaries are already concise from OpenAI
+
+async function translateText(text, targetLanguage) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, targetLanguage })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Translation failed: ${response.status}`);
+    }
+
+    const { translation } = await response.json();
+    return translation;
+  } catch (error) {
+    console.error('Translation error:', error);
+    return text;
+  }
+}
+
+// REMOVED: makeAnalysisConcise function - OpenAI already provides concise output
+
+// ===== PROMPT BUILDING =====
+
+function buildFactCheckPrompt(claim, pubmedResults, simplified, communitySentiment, probabilityScore) {
+  const researchSummary = simplified.map((item, idx) =>
+    `${idx + 1}. ${item.title}\n   Key findings: ${item.simplified}`
+  ).join('\n\n');
+
+  const communityInsights = communitySentiment.experiences.slice(0, 5).map((exp, idx) =>
+    `${idx + 1}. r/${exp.subreddit}: ${exp.post_title} (${exp.sentiment.toLowerCase()})`
+  ).join('\n');
+
+  return `You are a medical fact-checker analyzing health claims using scientific research AND community experiences.
+
+CLAIM TO VERIFY:
+"${claim}"
+
+CALCULATED PROBABILITY: ${probabilityScore.probability}% (Confidence: ${probabilityScore.confidence}%)
+- Research Evidence: ${probabilityScore.research_contribution}%
+- Community Experience: ${probabilityScore.community_contribution}%
+
+SCIENTIFIC RESEARCH (${pubmedResults.count} papers analyzed):
+${researchSummary}
+
+COMMUNITY SENTIMENT (${communitySentiment.sample_size} posts analyzed):
+- Positive experiences: ${Math.round(communitySentiment.positive * 100)}%
+- Negative experiences: ${Math.round(communitySentiment.negative * 100)}%
+- Neutral/Mixed: ${Math.round(communitySentiment.neutral * 100)}%
+
+TOP COMMUNITY INSIGHTS:
+${communityInsights}
+
+TASK: Provide a CONCISE fact-check. Keep each section brief:
+
+1. VERDICT: Choose ONE:
+   ✅ TRUE - Strong scientific evidence supports this
+   ⚠️ PARTIALLY TRUE - Some truth but important caveats
+   ❓ INSUFFICIENT EVIDENCE - Not enough research
+   ⚠️ MISLEADING - Contains truth but misrepresents facts
+   ❌ FALSE - Scientific evidence contradicts this
+
+2. SCIENTIFIC CONSENSUS: What do studies show? (2-3 sentences max)
+
+3. COMMUNITY CONSENSUS: What do real users report? (2-3 sentences max)
+
+4. BOTTOM LINE: Key takeaway in 1 sentence
+
+Keep response under 150 words total.`;
+}
+
+// ===== UI FUNCTIONS =====
+
+function formatMarkdown(text) {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/^\* /gm, '• ')
+    .replace(/^(\d+\.\s)/gm, '<strong>$1</strong>')
+    .replace(/^(✅|❌|⚠️|❓)/gm, '<strong>$1</strong>');
+}
+
+function showProgress(message) {
+  const resultDiv = document.getElementById('results');
+  resultDiv.innerHTML = `<p style="color: #667eea; font-weight: 600; padding: 15px; background: #f0f4ff; border-radius: 8px; text-align: center;">${message}</p>`;
+  resultDiv.style.display = 'block';
+}
+
+function displayResults(analysis, pubmedResults, simplified, redditData, communitySentiment, probabilityScore, language = 'en') {
+  const resultDiv = document.getElementById('results');
+
+  const langLabels = {
+    'en': 'English',
+    'es': 'Español',
+    'ja': '日本語'
+  };
+
+  let verdictColor = '#6b7280';
+  let verdictEmoji = '❓';
+
+  if (analysis.includes('✅ TRUE') || analysis.includes('✅ VERDADERO') || analysis.includes('✅ 本当')) {
+    verdictColor = '#059669';
+    verdictEmoji = '✅';
+  } else if (analysis.includes('❌ FALSE') || analysis.includes('❌ FALSO') || analysis.includes('❌ 間違い')) {
+    verdictColor = '#dc2626';
+    verdictEmoji = '❌';
+  } else if (analysis.includes('⚠️')) {
+    verdictColor = '#d97706';
+    verdictEmoji = '⚠️';
+  }
+
+  const probabilityColor = probabilityScore.probability >= 70 ? '#059669' :
+                           probabilityScore.probability >= 30 ? '#d97706' : '#dc2626';
+
+  const probabilitySection = `
+    <div style="margin-top: 12px; padding: 12px; background: rgba(255,255,255,0.1); border-radius: 6px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <span style="font-size: 14px; font-weight: 700;">Truth Score</span>
+        <span style="font-size: 18px; font-weight: 800; color: ${probabilityColor};">${probabilityScore.probability}%</span>
+      </div>
+      <div style="background: rgba(255,255,255,0.2); border-radius: 8px; height: 6px; overflow: hidden;">
+        <div style="background: ${probabilityColor}; height: 100%; width: ${probabilityScore.probability}%; transition: width 0.5s ease;"></div>
+      </div>
+      <div style="display: flex; justify-content: space-between; font-size: 10px; margin-top: 6px; opacity: 0.9;">
+        <span>Research Weight: ${probabilityScore.research_contribution}%</span>
+        <span>Community Weight: ${probabilityScore.community_contribution}%</span>
+        <span>Confidence: ${probabilityScore.confidence}%</span>
+      </div>
+      ${probabilityScore.breakdown.research_positive !== undefined ? `
+      <div style="font-size: 9px; margin-top: 4px; opacity: 0.8; text-align: center;">
+        Research: ${probabilityScore.breakdown.research_positive}% support • ${probabilityScore.breakdown.research_negative}% contradict
+      </div>
+      ` : ''}
+    </div>
+  `;
+
+  const aiBadges = `
+    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
+      ${pubmedResults.count > 0 ? '<span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">📚 PubMed + Semantic Scholar</span>' : ''}
+      <span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">🧠 Embeddings</span>
+      ${language !== 'en' ? '<span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">🌍 Translator</span>' : ''}
+      <span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">🤖 AI Analysis</span>
+    </div>
+  `;
+
+  let sourcesHTML = '';
+  if (pubmedResults.papers.length > 0) {
+    sourcesHTML = `
+      <div style="margin-top: 15px; padding: 12px; background: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb;">
+        <div id="research-header" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer;">
+          <h4 style="margin: 0; color: #1f2937; font-size: 13px; font-weight: 700;">
+            📚 View Research Details (${pubmedResults.count} papers)
+          </h4>
+          <span id="research-toggle" style="color: #6b7280; font-size: 12px;">▼ Show</span>
+        </div>
+        <div id="research-details" style="display: none; margin-top: 12px;">
+          ${pubmedResults.papers.map((paper, idx) => {
+            const simplifiedText = simplified[idx]?.simplified || 'Abstract not available';
+            const metadata = paper.studyMetadata;
+
+            // Build metadata display if available
+            let metadataHTML = '';
+            if (metadata && metadata.sampleSize !== 'not reported') {
+              const demo = metadata.demographics || {};
+              const stats = metadata.statistics || {};
+
+              metadataHTML = `
+                <div style="background: #fef3c7; padding: 6px 8px; border-radius: 3px; font-size: 10px; color: #78350f; margin-top: 6px; line-height: 1.5;">
+                  <strong>📊 Study Details:</strong><br/>
+                  ${metadata.studyType !== 'not reported' ? `<span style="display: inline-block; background: #fcd34d; padding: 1px 4px; border-radius: 2px; margin-right: 4px; font-size: 9px;">${metadata.studyType}</span>` : ''}
+                  ${metadata.sampleSize !== 'not reported' ? `<strong>n=${metadata.sampleSize}</strong> • ` : ''}
+                  ${demo.age !== 'not reported' ? `${demo.age} • ` : ''}
+                  ${demo.gender !== 'not reported' ? `${demo.gender}` : ''}
+                  ${demo.population !== 'not reported' ? `<br/><strong>Population:</strong> ${demo.population}` : ''}
+                  ${stats.pValue !== 'not reported' || stats.effectSize !== 'not reported' ? '<br/>' : ''}
+                  ${stats.pValue !== 'not reported' ? `<strong>p-value:</strong> ${stats.pValue} • ` : ''}
+                  ${stats.effectSize !== 'not reported' ? `<strong>Effect:</strong> ${stats.effectSize}` : ''}
+                  ${stats.significant === true ? ' <span style="color: #059669;">✓ Statistically significant</span>' : ''}
+                  ${stats.significant === false ? ' <span style="color: #dc2626;">Not significant</span>' : ''}
+                </div>
+              `;
+            }
+
+            return `
+            <div style="margin-bottom: 12px; padding: 10px; background: white; border-radius: 4px; border: 1px solid #e5e7eb;">
+              <div style="font-weight: 600; color: #1f2937; font-size: 12px; margin-bottom: 4px;">
+                <a href="${paper.url}" target="_blank" rel="noopener noreferrer" style="color: #3b82f6; text-decoration: none; cursor: pointer;">
+                  ${paper.title} ↗
+                </a>
+              </div>
+              <div style="font-size: 10px; color: #6b7280; margin-bottom: 6px;">
+                ${paper.authors} • ${paper.journal} (${paper.year})
+                ${paper.citations ? ` • <strong>${paper.citations} citations</strong>` : ''}
+                ${paper.influentialCitations ? ` (${paper.influentialCitations} influential)` : ''}
+              </div>
+              <div style="background: #f0f9ff; padding: 8px; border-radius: 3px; font-size: 11px; color: #0c4a6e; line-height: 1.4;">
+                <strong>Key Findings:</strong> ${simplifiedText}
+              </div>
+              ${metadataHTML}
+            </div>
+          `;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  let redditHTML = '';
+  if (redditData.length > 0) {
+    const topPosts = communitySentiment.experiences.slice(0, 4);
+    redditHTML = `
+      <div style="margin-top: 15px; padding: 12px; background: #fefbff; border-radius: 8px; border: 1px solid #e5e7eb;">
+        <h4 style="margin: 0 0 10px 0; color: #1f2937; font-size: 13px; font-weight: 700;">
+          💬 Community Experiences (${communitySentiment.sample_size} analyzed)
+        </h4>
+        <div style="display: flex; gap: 8px; margin-bottom: 10px; font-size: 11px;">
+          <span style="background: #dcfce7; color: #166534; padding: 2px 6px; border-radius: 3px;">
+            ✅ ${Math.round(communitySentiment.positive * 100)}% positive
+          </span>
+          <span style="background: #fef2f2; color: #991b1b; padding: 2px 6px; border-radius: 3px;">
+            ❌ ${Math.round(communitySentiment.negative * 100)}% negative
+          </span>
+        </div>
+        ${topPosts.map((post, idx) => {
+          const redditPost = redditData.find(r => r.title === post.post_title);
+          const postUrl = redditPost ? redditPost.url : '#';
+          return `
+          <div style="margin-bottom: 8px; padding: 8px; background: white; border-radius: 4px; border: 1px solid #e5e7eb;">
+            <div style="font-size: 10px; color: #6b7280; margin-bottom: 3px;">
+              r/${post.subreddit} • ${post.sentiment === 'POSITIVE' ? '✅' : post.sentiment === 'NEGATIVE' ? '❌' : '⚪'} ${post.sentiment.toLowerCase()}
+            </div>
+            <div style="font-size: 11px; color: #1f2937; font-weight: 500;">
+              <a href="${postUrl}" target="_blank" rel="noopener noreferrer" style="color: #3b82f6; text-decoration: none; cursor: pointer;">
+                ${post.post_title} ↗
+              </a>
+            </div>
+          </div>
+        `;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  resultDiv.innerHTML = `
+    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+      <h3 style="margin: 0 0 5px 0; font-size: 16px; display: flex; align-items: center; gap: 8px;">
+        ${verdictEmoji} Truth Dose
+      </h3>
+      <p style="margin: 0; font-size: 12px; opacity: 0.9;">
+        AI analysis: ${pubmedResults.count} papers + ${communitySentiment.sample_size} community posts${language !== 'en' ? ` • ${langLabels[language]}` : ''}
+      </p>
+      ${probabilitySection}
+    </div>
+
+    <div style="background: #ffffff; padding: 15px; border-radius: 8px;
+                border-left: 4px solid ${verdictColor}; margin-bottom: 15px;">
+      <div style="white-space: pre-wrap; font-family: inherit; margin: 0;
+                  line-height: 1.6; font-size: 13px; color: #1f2937;">${formatMarkdown(analysis)}</div>
+    </div>
+
+    ${sourcesHTML}
+
+    ${redditHTML}
+  `;
+
+  resultDiv.style.display = 'block';
+
+  setTimeout(() => {
+    const researchHeader = document.getElementById('research-header');
+    if (researchHeader) {
+      researchHeader.addEventListener('click', () => toggleSection('research-details'));
+    }
+  }, 100);
+}
+
+window.toggleSection = function(sectionId) {
+  const section = document.getElementById(sectionId);
+  const toggle = document.getElementById(sectionId.replace('-details', '-toggle'));
+
+  if (section.style.display === 'none') {
+    section.style.display = 'block';
+    toggle.textContent = '▲ Hide';
+  } else {
+    section.style.display = 'none';
+    toggle.textContent = '▼ Show';
+  }
+}
+
+// ===== MAIN CLICK HANDLER =====
+
+async function onCheckClick() {
+  const input = document.querySelector('#claimInput');
+  const languageSelect = document.querySelector('#language');
+  const language = languageSelect ? languageSelect.value : 'en';
+  const resultDiv = document.querySelector('#results');
+  const button = document.querySelector('#checkButton');
+  const claim = (input?.value || '').trim();
+
+  if (!claim) {
+    alert('Please enter a health claim to check');
+    return;
+  }
+
+  button.textContent = 'Researching...';
+  button.disabled = true;
+  resultDiv.style.display = 'none';
+
+  // Start overall timing
+  console.log('\n' + '='.repeat(80));
+  console.log('⏱️  PERFORMANCE TIMING - START');
+  console.log('='.repeat(80));
+  const startTime = performance.now();
+
+  try {
+    // Step 1: Run Hybrid search (PubMed + Semantic Scholar)
+    console.time('⏱️  Step 1: Hybrid Paper Search');
+    showProgress('Searching PubMed + Semantic Scholar...');
+    const pubmedResults = await searchHybrid(claim);
+    console.timeEnd('⏱️  Step 1: Hybrid Paper Search');
+
+    if (pubmedResults.count === 0) {
+      console.log('No papers found from PubMed or Semantic Scholar - using community-only analysis');
+
+      console.time('⏱️  Fetch Reddit Data (no papers)');
+      showProgress('No papers found. Gathering community insights...');
+      const redditData = await fetchRedditDataGlobal(claim, pubmedResults.medicalQuery);
+      console.timeEnd('⏱️  Fetch Reddit Data (no papers)');
+
+      console.time('⏱️  Analyze Community Sentiment (no papers)');
+      showProgress('Analyzing community sentiment...');
+      const communitySentiment = await analyzeCommunitySentiment(redditData, claim);
+      console.timeEnd('⏱️  Analyze Community Sentiment (no papers)');
+
+      console.time('⏱️  Calculate Probability Score (no papers)');
+      showProgress('Calculating probability score...');
+      const probabilityScore = calculateProbabilityScore(pubmedResults, communitySentiment, claim);
+      console.timeEnd('⏱️  Calculate Probability Score (no papers)');
+
+      console.time('⏱️  Generate AI Analysis (no papers)');
+      showProgress('Generating comprehensive fact-check...');
+
+      const prompt = buildFactCheckPrompt(claim, pubmedResults, [], communitySentiment, probabilityScore);
+
+      const response = await fetch(`${API_BASE_URL}/fact-check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Fact-check generation failed: ${response.status}`);
+      }
+
+      const { analysis } = await response.json();
+      console.timeEnd('⏱️  Generate AI Analysis (no papers)');
+
+      let finalAnalysis = analysis;
+      if (language !== 'en') {
+        console.time('⏱️  Translation (no papers)');
+        showProgress(`Translating to ${language === 'es' ? 'Spanish' : 'Japanese'}...`);
+        finalAnalysis = await translateText(analysis, language);
+        console.timeEnd('⏱️  Translation (no papers)');
+      }
+
+      const totalTime = ((performance.now() - startTime) / 1000).toFixed(2);
+      console.log('='.repeat(80));
+      console.log(`⏱️  TOTAL TIME: ${totalTime}s`);
+      console.log('='.repeat(80) + '\n');
+
+      displayResults(finalAnalysis, pubmedResults, [], redditData, communitySentiment, probabilityScore, language);
+      return;
+    }
+
+    // Step 2: Fetch abstracts and Reddit data in parallel
+    console.time('⏱️  Step 2: Fetch Abstracts + Reddit Data');
+    showProgress('Fetching research abstracts and community discussions...');
+    const [abstracts, redditData] = await Promise.all([
+      fetchAbstracts(pubmedResults.papers),
+      fetchRedditDataGlobal(claim, pubmedResults.medicalQuery)
+    ]);
+    console.timeEnd('⏱️  Step 2: Fetch Abstracts + Reddit Data');
+
+    // Step 3: Process research and community data in parallel
+    console.time('⏱️  Step 3: Summarize + Sentiment Analysis');
+    showProgress('Processing research findings and analyzing community sentiment...');
+    const [summaries, communitySentiment] = await Promise.all([
+      summarizeAbstracts(abstracts),
+      analyzeCommunitySentiment(redditData, claim)
+    ]);
+    console.timeEnd('⏱️  Step 3: Summarize + Sentiment Analysis');
+
+    // Merge summaries back into papers
+    const papersWithSummaries = pubmedResults.papers.map(paper => {
+      const summary = summaries.find(s => s.title === paper.title);
+      return {
+        ...paper,
+        summary: summary?.summary || paper.abstract?.substring(0, 200) || 'No summary available'
+      };
+    });
+
+    // Step 4: Analyze paper conclusions against claim
+    console.time('⏱️  Step 4: Analyze Paper Conclusions');
+    showProgress('Analyzing research conclusions...');
+    const papersWithAnalysis = await analyzePapers(claim, papersWithSummaries);
+    console.timeEnd('⏱️  Step 4: Analyze Paper Conclusions');
+
+    // Update pubmedResults with analyzed papers
+    pubmedResults.papers = papersWithAnalysis;
+
+    // Use summaries directly (no simplification needed with OpenAI)
+    const simplified = summaries.map(s => ({ ...s, simplified: s.summary }));
+
+    // Step 5: Calculate probabilistic score (now uses paper sentiments!)
+    console.time('⏱️  Step 5: Calculate Probability Score');
+    showProgress('Calculating probability score...');
+    const probabilityScore = calculateProbabilityScore(pubmedResults, communitySentiment, claim);
+    console.timeEnd('⏱️  Step 5: Calculate Probability Score');
+
+    // Step 6: Generate final analysis
+    console.time('⏱️  Step 6: Generate Final Analysis');
+    showProgress('Generating comprehensive fact-check...');
+
+    const prompt = buildFactCheckPrompt(claim, pubmedResults, simplified, communitySentiment, probabilityScore);
+
+    const response = await fetch(`${API_BASE_URL}/fact-check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Fact-check generation failed: ${response.status}`);
+    }
+
+    const { analysis: finalAnalysis } = await response.json();
+    console.timeEnd('⏱️  Step 6: Generate Final Analysis');
+
+    // Translate if needed
+    let translatedAnalysis = finalAnalysis;
+    if (language !== 'en') {
+      console.time('⏱️  Step 7: Translation');
+      showProgress(`Translating to ${language === 'es' ? 'Spanish' : 'Japanese'}...`);
+      translatedAnalysis = await translateText(finalAnalysis, language);
+      console.timeEnd('⏱️  Step 7: Translation');
+    }
+
+    // Calculate total time
+    const totalTime = ((performance.now() - startTime) / 1000).toFixed(2);
+    console.log('='.repeat(80));
+    console.log(`⏱️  TOTAL TIME: ${totalTime}s`);
+    console.log('='.repeat(80) + '\n');
+
+    // Display results
+    displayResults(translatedAnalysis, pubmedResults, simplified, redditData, communitySentiment, probabilityScore, language);
+
+  } catch (error) {
+    resultDiv.innerHTML = `<p style="color: red;"><strong>Error:</strong> ${error.message}</p>`;
+    resultDiv.style.display = 'block';
+    console.error('Full error:', error);
+  } finally {
+    button.textContent = 'How true is that?';
+    button.disabled = false;
+  }
+}
+
+// ===== INITIALIZATION =====
+
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.querySelector('#checkButton');
+  if (btn) btn.addEventListener('click', onCheckClick);
+
+  // Check if there's selected text from context menu and optionally auto-run
+  chrome.storage.local.get(['selectedText', 'runSearchOnOpen'], (result) => {
+    const { selectedText, runSearchOnOpen } = result || {};
+    if (selectedText) {
+      const input = document.querySelector('#claimInput');
+      if (input) input.value = selectedText;
+      // Clear the one-time values
+      chrome.storage.local.remove(['selectedText', 'runSearchOnOpen']);
+      // If requested, auto-run the search as soon as the popup is ready
+      if (runSearchOnOpen && btn) {
+        // Defer to next tick so layout is ready
+        setTimeout(() => btn.click(), 0);
+      }
+    }
+  });
+});
+
+// Prevent popup from closing when clicking external links
+document.addEventListener('click', (event) => {
+  const link = event.target.closest('a');
+  if (link && link.href && link.href.startsWith('http')) {
+    event.preventDefault();
+    chrome.tabs.create({ url: link.href });
+  }
+});
+

@@ -1,0 +1,12 @@
+{
+  "type": "module",
+  "scripts": {
+    "embed:csv": "node scripts/compute_embeddings.js"
+  },
+  "dependencies": {
+    "openai": "^4.0.0",
+    "csvtojson": "^2.0.10",
+    "dotenv": "^16.4.0"
+  }
+}
+

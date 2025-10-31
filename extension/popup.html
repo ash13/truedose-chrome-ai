@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    
+    body {
+      width: 500px;
+      min-height: 400px;
+      padding: 20px;
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+      background: white;
+    }
+    
+    .header {
+      text-align: center;
+      margin-bottom: 20px;
+      padding-bottom: 15px;
+      border-bottom: 2px solid #e5e7eb;
+    }
+    
+    .logo {
+      font-size: 48px;
+      margin-bottom: 10px;
+    }
+    
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      color: #1f2937;
+      font-weight: 700;
+    }
+    
+    .subtitle {
+      color: #6b7280;
+      font-size: 13px;
+      margin-top: 5px;
+    }
+    
+    .badge {
+      display: inline-block;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-top: 8px;
+    }
+    
+    label {
+      display: block;
+      margin-bottom: 8px;
+      margin-top: 15px;
+      color: #374151;
+      font-weight: 600;
+      font-size: 14px;
+    }
+    
+    textarea {
+      width: 100%;
+      height: 100px;
+      padding: 12px;
+      border: 2px solid #e5e7eb;
+      border-radius: 8px;
+      font-size: 14px;
+      font-family: inherit;
+      resize: vertical;
+      transition: border-color 0.2s;
+    }
+    
+    textarea:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+    
+    select {
+      width: 100%;
+      padding: 10px;
+      border: 2px solid #e5e7eb;
+      border-radius: 8px;
+      font-size: 14px;
+      font-family: inherit;
+      background: white;
+      cursor: pointer;
+    }
+    
+    select:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+    
+    button {
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+      margin-top: 15px;
+    }
+    
+    button:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+    
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    
+    #result {
+      margin-top: 20px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">
+      <img src = "TruthDose.png" width="64" height="64">
+    </div>
+    <h1>Truth Dose</h1>
+    <div class="subtitle">Your AI-powered tool to verify medical opinions you are reading online</div>
+    <!--<div class="badge">🤖 Chrome Built-in AI</div>!-->
+  </div>
+  
+  <label for="claimInput">Enter health claim to verify:</label>
+  <textarea
+    id="claimInput"
+    placeholder="e.g., 'Drinking lemon water every morning boosts immunity'"
+  ></textarea>
+
+  <!-- <label for="language">Result language:</label>
+  <select id="language">
+    <option value="en">🇬🇧 English</option>
+    <option value="es">🇪🇸 Español (Spanish)</option>
+    <option value="ja">🇯🇵 日本語 (Japanese)</option>
+  </select> -->
+
+  <button id="checkButton">How true is that?</button>
+
+  <div id="results"></div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>

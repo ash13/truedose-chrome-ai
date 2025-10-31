@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Truth Dose",
+  "version": "1.0",
+  "description": "Fact-check health claims you see online with an AI tool based on research and community anecdotes.",
+  "permissions": [
+    "contextMenus",
+    "activeTab",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://eutils.ncbi.nlm.nih.gov/*",
+    "https://www.reddit.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "TruthDose16.png",
+      "48": "TruthDose48.png",
+      "128": "TruthDose128.png"
+    }
+  },
+  "icons": {
+    "16": "TruthDose16.png",
+    "48": "TruthDose48.png",
+    "128": "TruthDose128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["subreddit_database.csv","subreddits_with_embeddings.json"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

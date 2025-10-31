@@ -1,0 +1,40 @@
+# Environment variables
+.env
+*.env
+
+# Node modules
+node_modules/
+
+# OS files
+.DS_Store
+._.DS_Store
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Logs
+*.log
+npm-debug.log*
+
+# Build outputs
+dist/
+build/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# Old/backup files
+*_old.js
+old_*.js
+*_backup.*
+
+# Large data files (optional - comment out if you want to track these)
+# subreddits_with_embeddings.json
