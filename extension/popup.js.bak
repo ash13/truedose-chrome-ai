@@ -403,11 +403,369 @@ async function extractStudyMetadata(papers) {
   }
 }
 
-function calculateTruthScore(pubmedResults, claim) {
-  let truthScore = 0.5;
+// ===== REDDIT FUNCTIONS =====
+
+function extractSearchTerms(claim) {
+  return claim.split(' ')
+    .filter(word => word.length > 3)
+    .slice(0, 3)
+    .join(' ');
+}
+
+function calculatePostRelevance(postData, claim) {
+  const title = postData.title.toLowerCase();
+  const text = postData.selftext.toLowerCase();
+  const claimLower = claim.toLowerCase();
+
+  let relevance = 0;
+  const claimWords = claimLower.split(' ').filter(word => word.length > 3);
+
+  for (const word of claimWords) {
+    if (title.includes(word)) relevance += 2;
+    if (text.includes(word)) relevance += 1;
+  }
+
+  return relevance / claimWords.length;
+}
+
+// OLD: Search within each subreddit separately (KEPT AS BACKUP)
+// To switch back, replace fetchRedditDataGlobal calls with fetchRedditData
+async function fetchRedditData(claim, subreddits, medicalKeywords) {
+  const redditPosts = [];
+  // Use medical keywords if provided, otherwise fall back to extraction
+  const searchTerms = medicalKeywords || extractSearchTerms(claim);
+
+  console.log(`Search terms for Reddit: "${searchTerms}"`);
+
+  for (const subreddit of subreddits) {
+    try {
+      console.log(`Fetching from r/${subreddit.name}...`);
+      const searchUrl = `https://www.reddit.com/r/${subreddit.name}/search.json?q=${encodeURIComponent(searchTerms)}&restrict_sr=1&sort=relevance&limit=15`;
+      const response = await fetch(searchUrl);
+      const data = await response.json();
+
+      if (data.data && data.data.children) {
+        const postCount = data.data.children.length;
+        console.log(`     ✓ Found ${postCount} posts in r/${subreddit.name}`);
+
+        data.data.children.forEach(post => {
+          const postData = post.data;
+          redditPosts.push({
+            subreddit: subreddit.name,
+            title: postData.title,
+            selftext: postData.selftext,
+            score: postData.score,
+            num_comments: postData.num_comments,
+            created_utc: postData.created_utc,
+            url: `https://www.reddit.com${postData.permalink}`,
+            relevance_score: calculatePostRelevance(postData, claim)
+          });
+        });
+      } else {
+        console.log(`No posts found in r/${subreddit.name}`);
+      }
+    } catch (error) {
+      console.error(`Error fetching from r/${subreddit.name}:`, error.message);
+    }
+  }
+
+  console.log(`\n Total posts collected: ${redditPosts.length}`);
+
+  // Rerank by embedding similarity (like papers)
+  const rankedPosts = await rerankRedditPostsByEmbeddings(claim, redditPosts);
+
+  console.log(`Top ${Math.min(8, rankedPosts.length)} most relevant posts selected\n`);
+
+  return rankedPosts.slice(0, 8);
+}
+
+// Global Reddit search (searches all of Reddit, no subreddit filtering)
+async function fetchRedditDataGlobal(claim, medicalKeywords) {
+  // Use medical keywords if provided, otherwise fall back to extraction
+  const searchTerms = medicalKeywords || extractSearchTerms(claim);
+
+  // Add experience-focused keywords to find personal stories, not questions
+  // Exclude "why" and "how" questions, prefer "I" statements
+  const experienceQuery = `${searchTerms} (selftext:I OR selftext:my OR selftext:experience) -title:why -title:how -title:what`;
+
+  console.log(`Search terms for Reddit: "${searchTerms}"`);
+  console.log(`Experience-focused query: "${experienceQuery}"`);
+  console.log(`Searching globally across all of Reddit...`);
+
+  try {
+    // Global Reddit search (like the search bar) - get 25 posts
+    // Use experience-focused query to find discussion posts, not questions
+    const searchUrl = `https://www.reddit.com/search.json?q=${encodeURIComponent(experienceQuery)}&sort=comments&limit=25`;
+    const response = await fetch(searchUrl);
+    const data = await response.json();
+
+    if (!data.data || !data.data.children) {
+      console.log('No results from global search');
+      return [];
+    }
+
+    const allPosts = data.data.children;
+    console.log(`Found ${allPosts.length} posts globally`);
+
+    // Convert to our format (NO filtering by subreddit - let embeddings decide!)
+    const redditPosts = allPosts.map(post => {
+      const postData = post.data;
+      return {
+        subreddit: postData.subreddit,
+        title: postData.title,
+        selftext: postData.selftext,
+        score: postData.score,
+        num_comments: postData.num_comments,
+        created_utc: postData.created_utc,
+        url: `https://www.reddit.com${postData.permalink}`,
+        relevance_score: calculatePostRelevance(postData, claim)
+      };
+    });
+
+    // Show breakdown by subreddit
+    const subredditCounts = {};
+    redditPosts.forEach(post => {
+      subredditCounts[post.subreddit] = (subredditCounts[post.subreddit] || 0) + 1;
+    });
+    console.log(`Posts by subreddit:`);
+    Object.entries(subredditCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .forEach(([sub, count]) => {
+        console.log(`     • r/${sub}: ${count} posts`);
+      });
+
+    console.log(`\nTotal posts collected: ${redditPosts.length}`);
+
+    // Rerank by embedding similarity (like papers)
+    const rankedPosts = await rerankRedditPostsByEmbeddings(claim, redditPosts);
+
+    console.log(`Top ${Math.min(8, rankedPosts.length)} most relevant posts selected\n`);
+
+    return rankedPosts.slice(0, 8);
+
+  } catch (error) {
+    console.error('Error in global Reddit search:', error);
+    return [];
+  }
+}
+
+async function fetchCommentsForPost(post) {
+  try {
+    // Extract post ID from URL: /r/subreddit/comments/POST_ID/title
+    const postIdMatch = post.url.match(/\/comments\/([a-z0-9]+)\//);
+    if (!postIdMatch) return [];
+
+    const postId = postIdMatch[1];
+    const commentsUrl = `https://www.reddit.com/r/${post.subreddit}/comments/${postId}.json?limit=10&sort=top`;
+
+    const response = await fetch(commentsUrl);
+    const data = await response.json();
+
+    if (!data || data.length < 2) return [];
+
+    // Reddit API returns [post_data, comments_data]
+    const commentsData = data[1];
+    if (!commentsData.data || !commentsData.data.children) return [];
+
+    // Extract top comments (filter out stickied/automod)
+    const comments = commentsData.data.children
+      .filter(comment => comment.kind === 't1' && comment.data.body && !comment.data.stickied)
+      .slice(0, 5) // Top 5 comments
+      .map(comment => ({
+        body: comment.data.body,
+        score: comment.data.score
+      }));
+
+    return comments;
+
+  } catch (error) {
+    console.error(`Error fetching comments for ${post.title}:`, error.message);
+    return [];
+  }
+}
+
+async function rerankRedditPostsByEmbeddings(claim, posts) {
+  if (posts.length === 0) return [];
+
+  try {
+    console.log(`Reranking ${posts.length} Reddit posts by semantic similarity...`);
+    console.time('Embedding Reddit Posts (parallel)');
+
+    // Embed claim + all post titles in parallel
+    const embeddingPromises = [
+      embedQueryRemote(claim),
+      ...posts.map(post => embedQueryRemote(post.title))
+    ];
+
+    const allEmbeddings = await Promise.all(embeddingPromises);
+    console.timeEnd('Embedding Reddit Posts (parallel)');
+
+    const claimEmbedding = allEmbeddings[0];
+    const postEmbeddings = allEmbeddings.slice(1);
+
+    // Calculate similarity scores
+    const scoredPosts = posts.map((post, idx) => ({
+      ...post,
+      similarityScore: cosineSim(claimEmbedding, postEmbeddings[idx])
+    }));
+
+    // Sort by similarity (highest first)
+    scoredPosts.sort((a, b) => b.similarityScore - a.similarityScore);
+
+    console.log('Top Reddit post similarities:');
+    scoredPosts.slice(0, 8).forEach((post, idx) => {
+      console.log(`  ${idx + 1}. ${(post.similarityScore * 100).toFixed(1)}% - ${post.title.substring(0, 60)}...`);
+    });
+
+    return scoredPosts;
+
+  } catch (error) {
+    console.error('Error reranking Reddit posts:', error);
+    // Fallback: return posts in original order
+    return posts;
+  }
+}
+
+async function analyzeCommunitySentiment(redditPosts, claim) {
+  if (redditPosts.length === 0) {
+    return {
+      positive: 0,
+      negative: 0,
+      neutral: 0,
+      confidence: 0,
+      sample_size: 0,
+      experiences: []
+    };
+  }
+
+  try {
+    const postsToAnalyze = redditPosts.slice(0, 5);
+    const UPVOTE_THRESHOLD = 2; // Minimum upvotes to include comment
+
+    // Fetch comments for each post in parallel
+    console.log(`Fetching comments for ${postsToAnalyze.length} posts...`);
+    console.time(' Fetch Comments');
+    const commentPromises = postsToAnalyze.map(post => fetchCommentsForPost(post));
+    const allComments = await Promise.all(commentPromises);
+    console.timeEnd('Fetch Comments');
+
+    // Flatten all comments and filter by upvote threshold
+    const flattenedComments = [];
+    postsToAnalyze.forEach((post, idx) => {
+      const postComments = allComments[idx] || [];
+      postComments.forEach(comment => {
+        if (comment.score >= UPVOTE_THRESHOLD) {
+          flattenedComments.push({
+            body: comment.body,
+            score: comment.score,
+            post_title: post.title,
+            subreddit: post.subreddit
+          });
+        }
+      });
+    });
+
+    const totalComments = allComments.reduce((sum, comments) => sum + comments.length, 0);
+    console.log(`Fetched ${totalComments} comments total`);
+    console.log(`Filtered to ${flattenedComments.length} comments with ≥${UPVOTE_THRESHOLD} upvotes`);
+
+    if (flattenedComments.length === 0) {
+      console.log('No comments meet upvote threshold');
+      return {
+        positive: 0,
+        negative: 0,
+        neutral: 1,
+        confidence: 0,
+        sample_size: 0,
+        experiences: []
+      };
+    }
+
+    // Log the actual comments being analyzed for debugging
+    console.log(`\nCOMMENTS BEING ANALYZED:`);
+    console.log('='.repeat(80));
+    flattenedComments.forEach((comment, idx) => {
+      console.log(`\nCOMMENT ${idx + 1}:`);
+      console.log(`  From: r/${comment.subreddit} - "${comment.post_title.substring(0, 60)}..."`);
+      console.log(`  Upvotes: ${comment.score}`);
+      console.log(`  Text: ${comment.body.substring(0, 300)}${comment.body.length > 300 ? '...' : ''}`);
+    });
+    console.log('='.repeat(80) + '\n');
+
+    console.log(`Analyzing ${flattenedComments.length} individual comments via OpenAI...`);
+
+    // Call OpenAI API with individual comments
+    const response = await fetch(`${API_BASE_URL}/analyze-sentiment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ claim, comments: flattenedComments })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Sentiment analysis failed: ${response.status}`);
+    }
+
+    const { results } = await response.json();
+
+    // Count sentiments across ALL comments
+    let positive = 0, negative = 0, neutral = 0;
+    const sentimentResults = results.map((result, idx) => {
+      const sentiment = result.sentiment || 'NEUTRAL';
+
+      // Aggregate counts
+      switch (sentiment) {
+        case 'POSITIVE': positive++; break;
+        case 'NEGATIVE': negative++; break;
+        default: neutral++; break;
+      }
+
+      return {
+        sentiment,
+        confidence: result.confidence || 0.5,
+        comment_preview: flattenedComments[idx].body.substring(0, 100),
+        score: flattenedComments[idx].score,
+        subreddit: flattenedComments[idx].subreddit,
+        post_title: flattenedComments[idx].post_title
+      };
+    });
+
+    const total = positive + negative + neutral;
+    const confidence = Math.min(total / 10, 1.0); // Confidence based on sample size
+
+    console.log(`Sentiment breakdown: ${positive} positive, ${negative} negative, ${neutral} neutral`);
+
+    return {
+      positive: positive / total,
+      negative: negative / total,
+      neutral: neutral / total,
+      confidence: confidence,
+      sample_size: total,
+      experiences: sentimentResults,
+      raw_posts: redditPosts.length
+    };
+
+  } catch (error) {
+    console.error('Error analyzing community sentiment:', error);
+    return {
+      positive: 0,
+      negative: 0,
+      neutral: 1,
+      confidence: 0,
+      sample_size: 0,
+      experiences: []
+    };
+  }
+}
+
+function calculateProbabilityScore(pubmedResults, communitySentiment, claim) {
+  const RESEARCH_WEIGHT = 0.7;
+  const COMMUNITY_WEIGHT = 0.3;
+
+  let researchScore = 0.5;
   let researchBreakdown = { positive: 0, negative: 0, neutral: 0 };
 
-  // Quality-weighted research score based on paper sentiments
+  // NEW: Quality-weighted research score based on paper sentiments
   if (pubmedResults.papers && pubmedResults.papers.length > 0) {
     const papersWithSentiment = pubmedResults.papers.filter(p => p.paperSentiment);
 
@@ -435,25 +793,25 @@ function calculateTruthScore(pubmedResults, claim) {
         }
       });
 
-      // Calculate truth score based on weighted sentiments
+      // Calculate research score based on weighted sentiments
       // POSITIVE = supports claim (score > 0.5)
       // NEGATIVE = contradicts claim (score < 0.5)
       // NEUTRAL = unclear (score = 0.5)
 
       if (weightedPositive > weightedNegative) {
         // More papers support the claim
-        truthScore = 0.5 + (weightedPositive * 0.4); // Range: [0.5, 0.9]
+        researchScore = 0.5 + (weightedPositive * 0.4); // Range: [0.5, 0.9]
       } else if (weightedNegative > weightedPositive) {
         // More papers contradict the claim
-        truthScore = 0.5 - (weightedNegative * 0.4); // Range: [0.1, 0.5]
+        researchScore = 0.5 - (weightedNegative * 0.4); // Range: [0.1, 0.5]
       } else {
         // Equal or all neutral
-        truthScore = 0.5;
+        researchScore = 0.5;
       }
 
       // Apply sample size confidence boost
       const sampleConfidence = Math.min(papersWithSentiment.length / 5, 1.0);
-      truthScore = truthScore + (sampleConfidence * 0.1 * (truthScore > 0.5 ? 1 : -1));
+      researchScore = researchScore + (sampleConfidence * 0.1 * (researchScore > 0.5 ? 1 : -1));
 
       researchBreakdown = {
         positive: Math.round(weightedPositive * 100),
@@ -462,28 +820,48 @@ function calculateTruthScore(pubmedResults, claim) {
       };
 
       console.log(`📊 Research sentiment: ${researchBreakdown.positive}% positive, ${researchBreakdown.negative}% negative, ${researchBreakdown.neutral}% neutral`);
-      console.log(`📈 Truth score: ${(truthScore * 100).toFixed(1)}% (quality-weighted)`);
+      console.log(`📈 Research score: ${(researchScore * 100).toFixed(1)}% (quality-weighted)`);
     } else {
       // Fallback to old count-based method if no sentiment analysis
       const paperConfidence = Math.min(pubmedResults.count / 5, 1.0);
-      truthScore = 0.6 + (paperConfidence * 0.3);
-      console.log(`⚠️  No paper sentiment data, using count-based score: ${(truthScore * 100).toFixed(1)}%`);
+      researchScore = 0.6 + (paperConfidence * 0.3);
+      console.log(`⚠️  No paper sentiment data, using count-based score: ${(researchScore * 100).toFixed(1)}%`);
     }
   }
 
-  // Confidence based on number of papers
+  let communityScore = 0.5;
+  if (communitySentiment.sample_size > 0) {
+    if (communitySentiment.positive > communitySentiment.negative) {
+      communityScore = 0.3 + (communitySentiment.positive * 0.5);
+    } else if (communitySentiment.negative > communitySentiment.positive) {
+      communityScore = 0.5 - (communitySentiment.negative * 0.3);
+    }
+    communityScore *= communitySentiment.confidence;
+  }
+
+  const finalScore = (researchScore * RESEARCH_WEIGHT) + (communityScore * COMMUNITY_WEIGHT);
+
   let confidence = 0.5;
-  if (pubmedResults.count > 0) confidence += 0.5; // Higher boost since papers are only source
+  if (pubmedResults.count > 0) confidence += 0.3;
+  if (communitySentiment.sample_size > 3) confidence += 0.2;
   confidence = Math.min(confidence, 1.0);
 
   return {
-    truthScore: Math.round(truthScore * 100),
+    probability: Math.round(finalScore * 100),
     confidence: Math.round(confidence * 100),
-    paperCount: pubmedResults.count,
+    research_contribution: Math.round(researchScore * RESEARCH_WEIGHT * 100),
+    community_contribution: Math.round(communityScore * COMMUNITY_WEIGHT * 100),
+    research_papers: pubmedResults.count,
+    community_posts: communitySentiment.sample_size,
     breakdown: {
-      positive: researchBreakdown.positive,
-      negative: researchBreakdown.negative,
-      neutral: researchBreakdown.neutral
+      research_score: Math.round(researchScore * 100),
+      community_score: Math.round(communityScore * 100),
+      research_positive: researchBreakdown.positive,
+      research_negative: researchBreakdown.negative,
+      research_neutral: researchBreakdown.neutral,
+      community_positive: Math.round(communitySentiment.positive * 100),
+      community_negative: Math.round(communitySentiment.negative * 100),
+      community_neutral: Math.round(communitySentiment.neutral * 100)
     }
   };
 }
@@ -601,22 +979,34 @@ async function translateText(text, targetLanguage) {
 
 // ===== PROMPT BUILDING =====
 
-function buildFactCheckPrompt(claim, pubmedResults, simplified, truthScore) {
+function buildFactCheckPrompt(claim, pubmedResults, simplified, communitySentiment, probabilityScore) {
   const researchSummary = simplified.map((item, idx) =>
     `${idx + 1}. ${item.title}\n   Key findings: ${item.simplified}`
   ).join('\n\n');
 
-  return `You are a medical fact-checker analyzing health claims using peer-reviewed scientific research.
+  const communityInsights = communitySentiment.experiences.slice(0, 5).map((exp, idx) =>
+    `${idx + 1}. r/${exp.subreddit}: ${exp.post_title} (${exp.sentiment.toLowerCase()})`
+  ).join('\n');
+
+  return `You are a medical fact-checker analyzing health claims using scientific research AND community experiences.
 
 CLAIM TO VERIFY:
 "${claim}"
 
-TRUTH SCORE: ${truthScore.truthScore}% (Confidence: ${truthScore.confidence}%)
-- Based on ${truthScore.paperCount} peer-reviewed papers
-- ${truthScore.breakdown.positive}% support, ${truthScore.breakdown.negative}% contradict, ${truthScore.breakdown.neutral}% mixed/unclear
+CALCULATED PROBABILITY: ${probabilityScore.probability}% (Confidence: ${probabilityScore.confidence}%)
+- Research Evidence: ${probabilityScore.research_contribution}%
+- Community Experience: ${probabilityScore.community_contribution}%
 
 SCIENTIFIC RESEARCH (${pubmedResults.count} papers analyzed):
 ${researchSummary}
+
+COMMUNITY SENTIMENT (${communitySentiment.sample_size} posts analyzed):
+- Positive experiences: ${Math.round(communitySentiment.positive * 100)}%
+- Negative experiences: ${Math.round(communitySentiment.negative * 100)}%
+- Neutral/Mixed: ${Math.round(communitySentiment.neutral * 100)}%
+
+TOP COMMUNITY INSIGHTS:
+${communityInsights}
 
 TASK: Provide a CONCISE fact-check. Keep each section brief:
 
@@ -627,11 +1017,13 @@ TASK: Provide a CONCISE fact-check. Keep each section brief:
    ⚠️ MISLEADING - Contains truth but misrepresents facts
    ❌ FALSE - Scientific evidence contradicts this
 
-2. SCIENTIFIC CONSENSUS: What do studies show? (3-4 sentences max)
+2. SCIENTIFIC CONSENSUS: What do studies show? (2-3 sentences max)
 
-3. BOTTOM LINE: Key takeaway in 1 sentence
+3. COMMUNITY CONSENSUS: What do real users report? (2-3 sentences max)
 
-Keep response under 120 words total.`;
+4. BOTTOM LINE: Key takeaway in 1 sentence
+
+Keep response under 150 words total.`;
 }
 
 // ===== UI FUNCTIONS =====
@@ -651,7 +1043,7 @@ function showProgress(message) {
   resultDiv.style.display = 'block';
 }
 
-function displayResults(analysis, pubmedResults, simplified, truthScore, language = 'en') {
+function displayResults(analysis, pubmedResults, simplified, redditData, communitySentiment, probabilityScore, language = 'en') {
   const resultDiv = document.getElementById('results');
 
   const langLabels = {
@@ -674,33 +1066,37 @@ function displayResults(analysis, pubmedResults, simplified, truthScore, languag
     verdictEmoji = '⚠️';
   }
 
-  const scoreColor = truthScore.truthScore >= 70 ? '#059669' :
-                      truthScore.truthScore >= 30 ? '#d97706' : '#dc2626';
+  const probabilityColor = probabilityScore.probability >= 70 ? '#059669' :
+                           probabilityScore.probability >= 30 ? '#d97706' : '#dc2626';
 
-  const scoreSection = `
+  const probabilitySection = `
     <div style="margin-top: 12px; padding: 12px; background: rgba(255,255,255,0.1); border-radius: 6px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
         <span style="font-size: 14px; font-weight: 700;">Truth Score</span>
-        <span style="font-size: 18px; font-weight: 800; color: ${scoreColor};">${truthScore.truthScore}%</span>
+        <span style="font-size: 18px; font-weight: 800; color: ${probabilityColor};">${probabilityScore.probability}%</span>
       </div>
       <div style="background: rgba(255,255,255,0.2); border-radius: 8px; height: 6px; overflow: hidden;">
-        <div style="background: ${scoreColor}; height: 100%; width: ${truthScore.truthScore}%; transition: width 0.5s ease;"></div>
+        <div style="background: ${probabilityColor}; height: 100%; width: ${probabilityScore.probability}%; transition: width 0.5s ease;"></div>
       </div>
       <div style="display: flex; justify-content: space-between; font-size: 10px; margin-top: 6px; opacity: 0.9;">
-        <span>${truthScore.paperCount} Papers</span>
-        <span>Confidence: ${truthScore.confidence}%</span>
+        <span>Research Weight: ${probabilityScore.research_contribution}%</span>
+        <span>Community Weight: ${probabilityScore.community_contribution}%</span>
+        <span>Confidence: ${probabilityScore.confidence}%</span>
       </div>
+      ${probabilityScore.breakdown.research_positive !== undefined ? `
       <div style="font-size: 9px; margin-top: 4px; opacity: 0.8; text-align: center;">
-        ${truthScore.breakdown.positive}% support • ${truthScore.breakdown.negative}% contradict • ${truthScore.breakdown.neutral}% mixed
+        Research: ${probabilityScore.breakdown.research_positive}% support • ${probabilityScore.breakdown.research_negative}% contradict
       </div>
+      ` : ''}
     </div>
   `;
 
   const aiBadges = `
     <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
-      <span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">📚 PubMed + Semantic Scholar</span>
+      ${pubmedResults.count > 0 ? '<span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">📚 PubMed + Semantic Scholar</span>' : ''}
+      <span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">🧠 Embeddings</span>
       ${language !== 'en' ? '<span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">🌍 Translator</span>' : ''}
-      <span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">🤖 Chrome AI</span>
+      <span style="background: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">🤖 AI Analysis</span>
     </div>
   `;
 
@@ -766,6 +1162,42 @@ function displayResults(analysis, pubmedResults, simplified, truthScore, languag
     `;
   }
 
+  let redditHTML = '';
+  if (redditData.length > 0) {
+    const topPosts = communitySentiment.experiences.slice(0, 4);
+    redditHTML = `
+      <div style="margin-top: 15px; padding: 12px; background: #fefbff; border-radius: 8px; border: 1px solid #e5e7eb;">
+        <h4 style="margin: 0 0 10px 0; color: #1f2937; font-size: 13px; font-weight: 700;">
+          💬 Community Experiences (${communitySentiment.sample_size} analyzed)
+        </h4>
+        <div style="display: flex; gap: 8px; margin-bottom: 10px; font-size: 11px;">
+          <span style="background: #dcfce7; color: #166534; padding: 2px 6px; border-radius: 3px;">
+            ✅ ${Math.round(communitySentiment.positive * 100)}% positive
+          </span>
+          <span style="background: #fef2f2; color: #991b1b; padding: 2px 6px; border-radius: 3px;">
+            ❌ ${Math.round(communitySentiment.negative * 100)}% negative
+          </span>
+        </div>
+        ${topPosts.map((post, idx) => {
+          const redditPost = redditData.find(r => r.title === post.post_title);
+          const postUrl = redditPost ? redditPost.url : '#';
+          return `
+          <div style="margin-bottom: 8px; padding: 8px; background: white; border-radius: 4px; border: 1px solid #e5e7eb;">
+            <div style="font-size: 10px; color: #6b7280; margin-bottom: 3px;">
+              r/${post.subreddit} • ${post.sentiment === 'POSITIVE' ? '✅' : post.sentiment === 'NEGATIVE' ? '❌' : '⚪'} ${post.sentiment.toLowerCase()}
+            </div>
+            <div style="font-size: 11px; color: #1f2937; font-weight: 500;">
+              <a href="${postUrl}" target="_blank" rel="noopener noreferrer" style="color: #3b82f6; text-decoration: none; cursor: pointer;">
+                ${post.post_title} ↗
+              </a>
+            </div>
+          </div>
+        `;
+        }).join('')}
+      </div>
+    `;
+  }
+
   resultDiv.innerHTML = `
     <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
@@ -773,10 +1205,9 @@ function displayResults(analysis, pubmedResults, simplified, truthScore, languag
         ${verdictEmoji} Truth Dose
       </h3>
       <p style="margin: 0; font-size: 12px; opacity: 0.9;">
-        AI analysis of ${pubmedResults.count} peer-reviewed papers${language !== 'en' ? ` • ${langLabels[language]}` : ''}
+        AI analysis: ${pubmedResults.count} papers + ${communitySentiment.sample_size} community posts${language !== 'en' ? ` • ${langLabels[language]}` : ''}
       </p>
-      ${scoreSection}
-      ${aiBadges}
+      ${probabilitySection}
     </div>
 
     <div style="background: #ffffff; padding: 15px; border-radius: 8px;
@@ -786,6 +1217,8 @@ function displayResults(analysis, pubmedResults, simplified, truthScore, languag
     </div>
 
     ${sourcesHTML}
+
+    ${redditHTML}
   `;
 
   resultDiv.style.display = 'block';
@@ -844,23 +1277,75 @@ async function onCheckClick() {
     console.timeEnd('⏱️  Step 1: Hybrid Paper Search');
 
     if (pubmedResults.count === 0) {
-      console.log('No research papers found');
-      resultDiv.innerHTML = '<p style="color: orange;"><strong>No Research Found:</strong> Could not find peer-reviewed papers for this claim. Try rephrasing your query.</p>';
-      resultDiv.style.display = 'block';
+      console.log('No papers found from PubMed or Semantic Scholar - using community-only analysis');
+
+      console.time('⏱️  Fetch Reddit Data (no papers)');
+      showProgress('No papers found. Gathering community insights...');
+      const redditData = await fetchRedditDataGlobal(claim, pubmedResults.medicalQuery);
+      console.timeEnd('⏱️  Fetch Reddit Data (no papers)');
+
+      console.time('⏱️  Analyze Community Sentiment (no papers)');
+      showProgress('Analyzing community sentiment...');
+      const communitySentiment = await analyzeCommunitySentiment(redditData, claim);
+      console.timeEnd('⏱️  Analyze Community Sentiment (no papers)');
+
+      console.time('⏱️  Calculate Probability Score (no papers)');
+      showProgress('Calculating probability score...');
+      const probabilityScore = calculateProbabilityScore(pubmedResults, communitySentiment, claim);
+      console.timeEnd('⏱️  Calculate Probability Score (no papers)');
+
+      console.time('⏱️  Generate AI Analysis (no papers)');
+      showProgress('Generating comprehensive fact-check...');
+
+      const prompt = buildFactCheckPrompt(claim, pubmedResults, [], communitySentiment, probabilityScore);
+
+      const response = await fetch(`${API_BASE_URL}/fact-check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Fact-check generation failed: ${response.status}`);
+      }
+
+      const { analysis } = await response.json();
+      console.timeEnd('⏱️  Generate AI Analysis (no papers)');
+
+      let finalAnalysis = analysis;
+      if (language !== 'en') {
+        console.time('⏱️  Translation (no papers)');
+        showProgress(`Translating to ${language === 'es' ? 'Spanish' : 'Japanese'}...`);
+        finalAnalysis = await translateText(analysis, language);
+        console.timeEnd('⏱️  Translation (no papers)');
+      }
+
+      const totalTime = ((performance.now() - startTime) / 1000).toFixed(2);
+      console.log('='.repeat(80));
+      console.log(`⏱️  TOTAL TIME: ${totalTime}s`);
+      console.log('='.repeat(80) + '\n');
+
+      displayResults(finalAnalysis, pubmedResults, [], redditData, communitySentiment, probabilityScore, language);
       return;
     }
 
-    // Step 2: Fetch abstracts
-    console.time('⏱️  Step 2: Fetch Abstracts');
-    showProgress('Fetching research abstracts...');
-    const abstracts = await fetchAbstracts(pubmedResults.papers);
-    console.timeEnd('⏱️  Step 2: Fetch Abstracts');
+    // Step 2: Fetch abstracts and Reddit data in parallel
+    console.time('⏱️  Step 2: Fetch Abstracts + Reddit Data');
+    showProgress('Fetching research abstracts and community discussions...');
+    const [abstracts, redditData] = await Promise.all([
+      fetchAbstracts(pubmedResults.papers),
+      fetchRedditDataGlobal(claim, pubmedResults.medicalQuery)
+    ]);
+    console.timeEnd('⏱️  Step 2: Fetch Abstracts + Reddit Data');
 
-    // Step 3: Summarize abstracts
-    console.time('⏱️  Step 3: Summarize Abstracts');
-    showProgress('Summarizing research findings...');
-    const summaries = await summarizeAbstracts(abstracts);
-    console.timeEnd('⏱️  Step 3: Summarize Abstracts');
+    // Step 3: Process research and community data in parallel
+    console.time('⏱️  Step 3: Summarize + Sentiment Analysis');
+    showProgress('Processing research findings and analyzing community sentiment...');
+    const [summaries, communitySentiment] = await Promise.all([
+      summarizeAbstracts(abstracts),
+      analyzeCommunitySentiment(redditData, claim)
+    ]);
+    console.timeEnd('⏱️  Step 3: Summarize + Sentiment Analysis');
 
     // Merge summaries back into papers
     const papersWithSummaries = pubmedResults.papers.map(paper => {
@@ -883,17 +1368,17 @@ async function onCheckClick() {
     // Use summaries directly (no simplification needed with OpenAI)
     const simplified = summaries.map(s => ({ ...s, simplified: s.summary }));
 
-    // Step 5: Calculate Truth Score (based on paper analysis!)
-    console.time('⏱️  Step 5: Calculate Truth Score');
-    showProgress('Calculating Truth Score...');
-    const truthScore = calculateTruthScore(pubmedResults, claim);
-    console.timeEnd('⏱️  Step 5: Calculate Truth Score');
+    // Step 5: Calculate probabilistic score (now uses paper sentiments!)
+    console.time('⏱️  Step 5: Calculate Probability Score');
+    showProgress('Calculating probability score...');
+    const probabilityScore = calculateProbabilityScore(pubmedResults, communitySentiment, claim);
+    console.timeEnd('⏱️  Step 5: Calculate Probability Score');
 
     // Step 6: Generate final analysis
     console.time('⏱️  Step 6: Generate Final Analysis');
     showProgress('Generating comprehensive fact-check...');
 
-    const prompt = buildFactCheckPrompt(claim, pubmedResults, simplified, truthScore);
+    const prompt = buildFactCheckPrompt(claim, pubmedResults, simplified, communitySentiment, probabilityScore);
 
     const response = await fetch(`${API_BASE_URL}/fact-check`, {
       method: 'POST',
@@ -924,7 +1409,7 @@ async function onCheckClick() {
     console.log('='.repeat(80) + '\n');
 
     // Display results
-    displayResults(translatedAnalysis, pubmedResults, simplified, truthScore, language);
+    displayResults(translatedAnalysis, pubmedResults, simplified, redditData, communitySentiment, probabilityScore, language);
 
   } catch (error) {
     resultDiv.innerHTML = `<p style="color: red;"><strong>Error:</strong> ${error.message}</p>`;
