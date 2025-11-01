@@ -909,6 +909,19 @@ function displayResults(analysis, pubmedResults, simplified, truthScore, languag
           }).join('')}
         </div>
       </div>
+
+      <!-- Community Insights Coming Soon -->
+      <div style="margin-top: 15px; padding: 15px; background: #ff4500; border-radius: 8px; border: 3px solid #ff5722;">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+          <img src="reddit_logo.png" alt="Reddit" style="height: 40px; width: auto;">
+          <h4 style="margin: 0; color: white; font-size: 15px; font-weight: 700;">
+            Community Insights: Coming Soon!
+          </h4>
+        </div>
+        <p style="margin: 0; font-size: 12px; color: white; line-height: 1.6; opacity: 0.95;">
+          Sometimes there is no research around a particular health claim but regional and crowdsourced community experiences can be extremely helpful, especially for under-represented communities in medical research. We hope to build that feature next.
+        </p>
+      </div>
     `;
   }
 
