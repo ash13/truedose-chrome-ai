@@ -46,7 +46,7 @@ async function getLanguageModelSession() {
       systemPrompt: "You are a medical fact-checker analyzing health claims using peer-reviewed research. Provide concise, evidence-based analysis.",
       outputLanguage: "en"
     });
-    console.log('✓ Chrome Prompt API session created');
+    console.log('Chrome Prompt API session created');
   }
   return cachedSessions.languageModel;
 }
@@ -59,7 +59,7 @@ async function getSummarizerSession() {
     cachedSessions.summarizer = await Summarizer.create({
       outputLanguage: "en"
     });
-    console.log('✓ Chrome Summarizer API session created');
+    console.log('Chrome Summarizer API session created');
   }
   return cachedSessions.summarizer;
 }
@@ -72,7 +72,7 @@ async function getRewriterSession() {
     cachedSessions.rewriter = await Rewriter.create({
       outputLanguage: "en"
     });
-    console.log('✓ Chrome Rewriter API session created');
+    console.log('Chrome Rewriter API session created');
   }
   return cachedSessions.rewriter;
 }
@@ -86,65 +86,64 @@ async function getTranslatorSession(targetLanguage) {
     sourceLanguage: 'en',
     targetLanguage: targetLanguage
   });
-  console.log(`✓ Chrome Translator API session created (en → ${targetLanguage})`);
+  console.log(`Chrome Translator API session created (en -> ${targetLanguage})`);
   return translator;
 }
 
 // ===== PUBMED FUNCTIONS =====
 
 async function rephraseToMedicalQuery(claim) {
-  console.time('  ⏱️  Chrome AI Rephrase');
+  console.log('\n' + '═'.repeat(80));
+  console.log('CHROME AI - QUERY REPHRASING');
+  console.log('═'.repeat(80));
+  console.log(`Original Claim: "${claim}"`);
+  console.time('Rephrasing Duration');
+
   try {
+    console.log('Creating Chrome Prompt API session...');
     const session = await getLanguageModelSession();
+    console.log('Session created successfully');
 
-    const prompt = `Convert health statements into search queries for medical research databases.
+    //TODO: Work on prompt to make results better
+    const prompt = `Rephrase given text into optimized search phrase for medical research databases
+    (use max 5-10 words).  
 
-Your task:
-1. Identify the main health topic and any substances/interventions mentioned
-2. Keep the core relationship between concepts (avoid, help, cause, treat, etc.)
-3. Use medical terms when clear synonyms exist, but don't add concepts
-4. Rephrase concisely
-
-Examples:
-Input: "people who have hypothyroidism should avoid soy"
-Output: hypothyroidism soy effects 
-
-Input: "turmeric helps with joint pain"
-Output: curcumin turmeric joint pain arthritis anti-inflammatory effects
-
-Input: "intermittent fasting for weight loss"
-Output: intermittent fasting weight loss obesity metabolic effects
-
-Input: "probiotics cure IBS"
-Output: probiotics irritable bowel syndrome treatment efficacy
 
 Claim: "${claim}"
 
 Return ONLY the search query, nothing else.`;
 
+    console.log('Sending to Chrome AI Prompt API...');
     const query = await session.prompt(prompt);
     const cleaned = query.trim();
 
-    console.log(`🔬 Original: "${claim}"`);
-    console.log(`🔬 Rephrased via Chrome AI: "${cleaned}"`);
-    console.timeEnd('  ⏱️  Chrome AI Rephrase');
+    console.log(`Rephrased Query: "${cleaned}"`);
+    console.timeEnd('Rephrasing Duration');
+    console.log('═'.repeat(80) + '\n');
     return cleaned;
 
   } catch (error) {
-    console.error('Error rephrasing via Chrome AI:', error);
+    console.error('ERROR: Rephrasing via Chrome AI failed:', error);
     // Fallback: remove common words
     const fallback = claim.split(' ')
       .filter(word => word.length > 3 && !['should', 'people', 'avoid', 'have', 'with', 'that', 'this', 'could', 'would', 'every', 'always', 'never'].includes(word.toLowerCase()))
       .slice(0, 5)
       .join(' ');
 
-    console.log(`⚠️ Using fallback keywords: "${fallback}"`);
+    console.log(`WARNING: Using fallback keywords: "${fallback}"`);
+    console.log('═'.repeat(80) + '\n');
     return fallback;
   }
 }
 
 // Search PubMed for medical papers
 async function searchPubMed(medicalQuery) {
+  console.log('\n' + '═'.repeat(80));
+  console.log('PUBMED API - SEARCHING MEDICAL LITERATURE');
+  console.log('═'.repeat(80));
+  console.log(`Query: "${medicalQuery}"`);
+  console.log('Fetching from PubMed database...');
+
   try {
     const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(medicalQuery)}&retmax=10&retmode=json&sort=relevance`;
 
@@ -153,12 +152,16 @@ async function searchPubMed(medicalQuery) {
     const pmids = searchData.esearchresult.idlist;
 
     if (pmids.length === 0) {
+      console.log('WARNING: No papers found in PubMed');
+      console.log('═'.repeat(80) + '\n');
       return [];
     }
 
-    console.log(`  ✓ Found ${pmids.length} papers from PubMed`);
+    console.log(`SUCCESS: Found ${pmids.length} papers from PubMed`);
+    console.log(`Paper IDs: ${pmids.slice(0, 3).join(', ')}${pmids.length > 3 ? '...' : ''}`);
 
     // Get paper metadata
+    console.log('Fetching paper metadata...');
     const summaryUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${pmids.join(',')}&retmode=json`;
     const summaryResponse = await fetch(summaryUrl);
     const summaryData = await summaryResponse.json();
@@ -184,15 +187,24 @@ async function searchPubMed(medicalQuery) {
       };
     });
 
+    console.log(`SUCCESS: Retrieved metadata for ${papers.length} papers`);
+    console.log('═'.repeat(80) + '\n');
     return papers;
   } catch (error) {
-    console.error('PubMed search error:', error);
+    console.error('ERROR: PubMed search failed:', error);
+    console.log('═'.repeat(80) + '\n');
     return [];
   }
 }
 
 // Search Semantic Scholar
 async function searchSemanticScholar(medicalQuery) {
+  console.log('\n' + '═'.repeat(80));
+  console.log('SEMANTIC SCHOLAR API - SEARCHING ACADEMIC DATABASE');
+  console.log('═'.repeat(80));
+  console.log(`Query: "${medicalQuery}"`);
+  console.log('Fetching from Semantic Scholar...');
+
   try {
     const searchUrl = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(medicalQuery)}&fields=title,abstract,authors,year,citationCount,influentialCitationCount,venue,externalIds,url&limit=10`;
 
@@ -200,7 +212,8 @@ async function searchSemanticScholar(medicalQuery) {
 
     if (!searchResponse.ok) {
       if (searchResponse.status === 429) {
-        console.warn('⚠️  Semantic Scholar rate limit reached - continuing with PubMed only');
+        console.warn('WARNING: Rate limit reached - continuing with PubMed only');
+        console.log('═'.repeat(80) + '\n');
         return [];
       }
       throw new Error(`Semantic Scholar API error: ${searchResponse.status}`);
@@ -210,10 +223,12 @@ async function searchSemanticScholar(medicalQuery) {
     const results = searchData.data || [];
 
     if (results.length === 0) {
+      console.log('WARNING: No papers found in Semantic Scholar');
+      console.log('═'.repeat(80) + '\n');
       return [];
     }
 
-    console.log(`  ✓ Found ${results.length} papers from Semantic Scholar`);
+    console.log(`SUCCESS: Found ${results.length} papers from Semantic Scholar`);
 
     const papers = results
       .filter(paper => paper.abstract)
@@ -232,16 +247,19 @@ async function searchSemanticScholar(medicalQuery) {
         source: 'semantic_scholar'
       }));
 
+    console.log(`Papers with abstracts: ${papers.length}/${results.length}`);
+    console.log('═'.repeat(80) + '\n');
     return papers;
   } catch (error) {
-    console.warn('⚠️  Semantic Scholar unavailable - continuing with PubMed only:', error.message);
+    console.warn('WARNING: Semantic Scholar unavailable:', error.message);
+    console.log('═'.repeat(80) + '\n');
     return [];
   }
 }
 
 // Enrich PubMed papers with citation data from Semantic Scholar
 async function enrichPubMedWithCitations(pubmedPapers) {
-  console.log(`  🔗 Enriching ${pubmedPapers.length} PubMed papers with citation data...`);
+  console.log(`  Enriching ${pubmedPapers.length} PubMed papers with citation data...`);
 
   const enrichedPapers = await Promise.all(
     pubmedPapers.map(async (paper) => {
@@ -256,7 +274,7 @@ async function enrichPubMedWithCitations(pubmedPapers) {
             if (response.ok) {
               s2Data = await response.json();
             } else if (response.status === 429) {
-              console.warn(`  ⚠️  Rate limited on DOI lookup for ${paper.title.substring(0, 50)}...`);
+              console.warn(`  WARNING: Rate limited on DOI lookup for ${paper.title.substring(0, 50)}...`);
             }
           } catch (e) {
             // Silently fail on network errors
@@ -270,7 +288,7 @@ async function enrichPubMedWithCitations(pubmedPapers) {
             if (response.ok) {
               s2Data = await response.json();
             } else if (response.status === 429) {
-              console.warn(`  ⚠️  Rate limited on PMID lookup`);
+              console.warn(`  WARNING: Rate limited on PMID lookup`);
             }
           } catch (e) {
             // Silently fail on network errors
@@ -295,7 +313,7 @@ async function enrichPubMedWithCitations(pubmedPapers) {
     })
   );
 
-  console.log(`  ✓ Enrichment complete`);
+  console.log(`  Enrichment complete`);
   return enrichedPapers;
 }
 
@@ -550,11 +568,17 @@ function calculateTruthScore(pubmedResults, claim) {
         }
       });
 
+      // Normalize to ensure percentages add up to 100%
+      const total = weightedPositive + weightedNegative + weightedNeutral;
+      const normalizedPositive = total > 0 ? weightedPositive / total : 0;
+      const normalizedNegative = total > 0 ? weightedNegative / total : 0;
+      const normalizedNeutral = total > 0 ? weightedNeutral / total : 0;
+
       // Convert to percentages for display
       researchBreakdown = {
-        positive: Math.round(weightedPositive * 100),
-        negative: Math.round(weightedNegative * 100),
-        neutral: Math.round(weightedNeutral * 100)
+        positive: Math.round(normalizedPositive * 100),
+        negative: Math.round(normalizedNegative * 100),
+        neutral: Math.round(normalizedNeutral * 100)
       };
 
       // SIMPLE TRUTH SCORE CALCULATION:
@@ -573,24 +597,17 @@ function calculateTruthScore(pubmedResults, claim) {
       // Clamp between 0 and 100
       truthScore = Math.max(0, Math.min(100, truthScore));
 
-      console.log(`📊 Research sentiment: ${researchBreakdown.positive}% support, ${researchBreakdown.negative}% contradict, ${researchBreakdown.neutral}% neutral`);
-      console.log(`📈 Truth score: ${truthScore.toFixed(0)}% (${supportPercent}% - ${contradictPercent}%)`);
+      console.log(`Research sentiment: ${researchBreakdown.positive}% support, ${researchBreakdown.negative}% contradict, ${researchBreakdown.neutral}% neutral`);
+      console.log(`Truth score: ${truthScore.toFixed(0)}% (${supportPercent}% - ${contradictPercent}%)`);
     } else {
       // Fallback: if papers found but no sentiment analysis
       truthScore = 50; // Neutral if we can't analyze
-      console.log(`⚠️  No paper sentiment data, using neutral score: ${truthScore}%`);
+      console.log(`WARNING: No paper sentiment data, using neutral score: ${truthScore}%`);
     }
   }
 
-  // Confidence based on number of papers analyzed
-  let confidence = 50;
-  if (pubmedResults.count >= 5) confidence = 90;
-  else if (pubmedResults.count >= 3) confidence = 80;
-  else if (pubmedResults.count >= 1) confidence = 60;
-
   return {
     truthScore: Math.round(truthScore),
-    confidence: confidence,
     paperCount: pubmedResults.count,
     breakdown: {
       positive: researchBreakdown.positive,
@@ -605,15 +622,25 @@ function calculateTruthScore(pubmedResults, claim) {
 async function summarizeAbstracts(abstracts) {
   if (abstracts.length === 0) return [];
 
-  console.log(`Summarizing ${abstracts.length} abstracts via Chrome Summarizer API...`);
+  console.log('\n' + '═'.repeat(80));
+  console.log('CHROME AI - SUMMARIZING ABSTRACTS');
+  console.log('═'.repeat(80));
+  console.log(`Abstracts to summarize: ${abstracts.length}`);
+  console.time('Total Summarization Duration');
 
   try {
+    console.log('Getting Chrome Summarizer API session...');
     const summarizer = await getSummarizerSession();
+    console.log('Session ready');
+    console.log('Summarizing abstracts in parallel using Chrome AI...\n');
 
+    let completed = 0;
     // Parallelize all summarization calls
-    const summaryPromises = abstracts.map(async (item) => {
+    const summaryPromises = abstracts.map(async (item, idx) => {
       try {
         const summary = await summarizer.summarize(item.abstract);
+        completed++;
+        console.log(`  Summarized paper ${completed}/${abstracts.length}: "${item.title.substring(0, 50)}..."`);
 
         return {
           paperId: item.paperId,
@@ -622,7 +649,7 @@ async function summarizeAbstracts(abstracts) {
           summary: summary
         };
       } catch (error) {
-        console.error(`Error summarizing ${item.paperId || item.pmid}:`, error);
+        console.error(`  ERROR: Summarizing paper ${idx + 1} failed:`, error.message);
         // Fallback: use first 200 chars
         return {
           paperId: item.paperId,
@@ -633,9 +660,15 @@ async function summarizeAbstracts(abstracts) {
       }
     });
 
-    return await Promise.all(summaryPromises);
+    const results = await Promise.all(summaryPromises);
+    console.timeEnd('Total Summarization Duration');
+    console.log(`SUCCESS: Summarized ${completed}/${abstracts.length} abstracts`);
+    console.log('═'.repeat(80) + '\n');
+
+    return results;
   } catch (error) {
-    console.error('Chrome Summarizer API not available:', error);
+    console.error('ERROR: Chrome Summarizer API not available:', error);
+    console.log('═'.repeat(80) + '\n');
     // Fallback: return truncated abstracts
     return abstracts.map(item => ({
       paperId: item.paperId,
@@ -650,10 +683,18 @@ async function summarizeAbstracts(abstracts) {
 async function analyzePapers(claim, papers) {
   if (papers.length === 0) return papers;
 
-  try {
-    console.log(`🔬 Analyzing ${papers.length} papers against claim...`);
+  console.log('\n' + '═'.repeat(80));
+  console.log('CHROME AI - ANALYZING PAPERS VS CLAIM');
+  console.log('═'.repeat(80));
+  console.log(`Claim: "${claim}"`);
+  console.log(`Papers to analyze: ${papers.length}`);
+  console.time('Total Analysis Duration');
 
+  try {
+    console.log('Getting Chrome Prompt API session...');
     const session = await getLanguageModelSession();
+    console.log('Session ready');
+    console.log('Analyzing papers in parallel using Chrome AI...\n');
 
     // Analyze papers in parallel
     const analysisPromises = papers.map(async (paper) => {
@@ -704,14 +745,44 @@ Return ONLY valid JSON, no other text.`;
 
     const papersWithSentiment = await Promise.all(analysisPromises);
 
-    console.log(`✅ Paper analysis complete`);
-    papersWithSentiment.forEach((paper, idx) => {
-      console.log(`  ${idx + 1}. ${paper.paperSentiment.sentiment} (${(paper.paperSentiment.confidence * 100).toFixed(0)}%) - ${paper.title.substring(0, 60)}...`);
+    // Override sentiment for papers without statistical significance
+    papersWithSentiment.forEach(paper => {
+      const metadata = paper.studyMetadata;
+      const sentiment = paper.paperSentiment;
+
+      // If paper claims to SUPPORT but is not statistically significant, mark as neutral
+      if (sentiment.sentiment === 'POSITIVE' &&
+          metadata &&
+          metadata.statistics?.significant === false) {
+        paper.paperSentiment = {
+          sentiment: 'NEUTRAL',
+          confidence: sentiment.confidence,
+          reason: sentiment.reason + ' (Not statistically significant)',
+          notSignificant: true  // Flag for UI display
+        };
+      }
     });
 
+    console.timeEnd('Total Analysis Duration');
+    console.log('\nANALYSIS RESULTS:');
+    console.log('─'.repeat(80));
+
+    papersWithSentiment.forEach((paper, idx) => {
+      const sentiment = paper.paperSentiment;
+      const label = sentiment.sentiment === 'POSITIVE' ? 'SUPPORTS' :
+                    sentiment.sentiment === 'NEGATIVE' ? 'CONTRADICTS' : 'NEUTRAL';
+      const labelSuffix = sentiment.notSignificant ? ' (not significant)' : '';
+      const conf = (sentiment.confidence * 100).toFixed(0);
+      console.log(`Paper ${idx + 1}: ${label}${labelSuffix} (${conf}% confidence)`);
+      console.log(`   "${paper.title.substring(0, 70)}..."`);
+      console.log(`   Reason: ${sentiment.reason}\n`);
+    });
+
+    console.log('═'.repeat(80) + '\n');
     return papersWithSentiment;
   } catch (error) {
-    console.error('Error analyzing papers:', error);
+    console.error('ERROR: Paper analysis failed:', error);
+    console.log('═'.repeat(80) + '\n');
     // Return papers without sentiment analysis (fallback)
     return papers;
   }
@@ -723,7 +794,7 @@ async function translateText(text, targetLanguage) {
   try {
     const translator = await getTranslatorSession(targetLanguage);
     const translation = await translator.translate(text);
-    console.log(`✓ Translated to ${targetLanguage}`);
+    console.log(`Translated to ${targetLanguage}`);
     return translation;
   } catch (error) {
     console.error(`Chrome Translator API not available for ${targetLanguage}:`, error);
@@ -746,7 +817,7 @@ function buildFactCheckPrompt(claim, pubmedResults, simplified, truthScore) {
 CLAIM TO VERIFY:
 "${claim}"
 
-TRUTH SCORE: ${truthScore.truthScore}% (Confidence: ${truthScore.confidence}%)
+TRUTH SCORE: ${truthScore.truthScore}%
 - Based on ${truthScore.paperCount} peer-reviewed papers
 - ${truthScore.breakdown.positive}% support, ${truthScore.breakdown.negative}% contradict, ${truthScore.breakdown.neutral}% neutral
 
@@ -807,9 +878,8 @@ function displayResults(analysis, pubmedResults, simplified, truthScore, languag
       <div style="background: rgba(255,255,255,0.3); border-radius: 8px; height: 8px; overflow: hidden;">
         <div style="background: ${scoreColor}; height: 100%; width: ${truthScore.truthScore}%; transition: width 0.5s ease;"></div>
       </div>
-      <div style="display: flex; justify-content: space-between; font-size: 10px; margin-top: 6px; opacity: 0.9;">
-        <span>${truthScore.paperCount} Papers</span>
-        <span>Confidence: ${truthScore.confidence}%</span>
+      <div style="display: flex; justify-content: center; font-size: 10px; margin-top: 6px; opacity: 0.9;">
+        <span>${truthScore.paperCount} Papers Analyzed</span>
       </div>
       <div style="font-size: 9px; margin-top: 4px; opacity: 0.8; text-align: center;">
         ${truthScore.breakdown.positive}% support • ${truthScore.breakdown.negative}% contradict • ${truthScore.breakdown.neutral}% neutral
@@ -847,20 +917,17 @@ function displayResults(analysis, pubmedResults, simplified, truthScore, languag
             // Determine sentiment tag
             let sentimentTag = '';
             if (sentiment) {
-              const isSignificant = metadata?.statistics?.significant === true;
-
               if (sentiment.sentiment === 'POSITIVE') {
-                // Only show SUPPORTS if statistically significant (if we have that data)
-                if (isSignificant || !metadata || metadata.statistics?.significant === undefined) {
-                  sentimentTag = '<span style="display: inline-block; background: #dcfce7; color: #166534; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; margin-left: 6px;">SUPPORTS</span>';
-                } else if (metadata.statistics?.significant === false) {
-                  // Has data but not significant - show neutral
-                  sentimentTag = '<span style="display: inline-block; background: #fef9c3; color: #854d0e; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; margin-left: 6px;">NEUTRAL (not significant)</span>';
-                }
+                sentimentTag = '<span style="display: inline-block; background: #dcfce7; color: #166534; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; margin-left: 6px;">SUPPORTS</span>';
               } else if (sentiment.sentiment === 'NEGATIVE') {
                 sentimentTag = '<span style="display: inline-block; background: #fee2e2; color: #991b1b; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; margin-left: 6px;">CONTRADICTS</span>';
-              } else {
-                sentimentTag = '<span style="display: inline-block; background: #fef9c3; color: #854d0e; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; margin-left: 6px;">NEUTRAL</span>';
+              } else if (sentiment.sentiment === 'NEUTRAL') {
+                // Check if it's neutral due to lack of statistical significance
+                if (sentiment.notSignificant) {
+                  sentimentTag = '<span style="display: inline-block; background: #fef9c3; color: #854d0e; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; margin-left: 6px;">NOT SIGNIFICANT</span>';
+                } else {
+                  sentimentTag = '<span style="display: inline-block; background: #fef9c3; color: #854d0e; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; margin-left: 6px;">NEUTRAL</span>';
+                }
               }
             }
 
@@ -990,16 +1057,16 @@ async function onCheckClick() {
 
   // Start overall timing
   console.log('\n' + '='.repeat(80));
-  console.log('⏱️  PERFORMANCE TIMING - START');
+  console.log('PERFORMANCE TIMING - START');
   console.log('='.repeat(80));
   const startTime = performance.now();
 
   try {
     // Step 1: Run Hybrid search (PubMed + Semantic Scholar)
-    console.time('⏱️  Step 1: Hybrid Paper Search');
+    console.time('Step 1: Hybrid Paper Search');
     showProgress('Searching PubMed + Semantic Scholar...');
     const pubmedResults = await searchHybrid(claim);
-    console.timeEnd('⏱️  Step 1: Hybrid Paper Search');
+    console.timeEnd('Step 1: Hybrid Paper Search');
 
     if (pubmedResults.count === 0) {
       console.log('No research papers found');
@@ -1009,16 +1076,16 @@ async function onCheckClick() {
     }
 
     // Step 2: Fetch abstracts
-    console.time('⏱️  Step 2: Fetch Abstracts');
+    console.time('Step 2: Fetch Abstracts');
     showProgress('Fetching research abstracts...');
     const abstracts = await fetchAbstracts(pubmedResults.papers);
-    console.timeEnd('⏱️  Step 2: Fetch Abstracts');
+    console.timeEnd('Step 2: Fetch Abstracts');
 
     // Step 3: Summarize abstracts
-    console.time('⏱️  Step 3: Summarize Abstracts');
+    console.time('Step 3: Summarize Abstracts');
     showProgress('Summarizing research findings...');
     const summaries = await summarizeAbstracts(abstracts);
-    console.timeEnd('⏱️  Step 3: Summarize Abstracts');
+    console.timeEnd('Step 3: Summarize Abstracts');
 
     // Merge summaries back into papers
     const papersWithSummaries = pubmedResults.papers.map(paper => {
@@ -1030,10 +1097,10 @@ async function onCheckClick() {
     });
 
     // Step 4: Analyze paper conclusions against claim
-    console.time('⏱️  Step 4: Analyze Paper Conclusions');
+    console.time('Step 4: Analyze Paper Conclusions');
     showProgress('Analyzing research conclusions...');
     const papersWithAnalysis = await analyzePapers(claim, papersWithSummaries);
-    console.timeEnd('⏱️  Step 4: Analyze Paper Conclusions');
+    console.timeEnd('Step 4: Analyze Paper Conclusions');
 
     // Update pubmedResults with analyzed papers
     pubmedResults.papers = papersWithAnalysis;
@@ -1042,34 +1109,34 @@ async function onCheckClick() {
     const simplified = summaries.map(s => ({ ...s, simplified: s.summary }));
 
     // Step 5: Calculate Truth Score (based on paper analysis!)
-    console.time('⏱️  Step 5: Calculate Truth Score');
+    console.time('Step 5: Calculate Truth Score');
     showProgress('Calculating Truth Score...');
     const truthScore = calculateTruthScore(pubmedResults, claim);
-    console.timeEnd('⏱️  Step 5: Calculate Truth Score');
+    console.timeEnd('Step 5: Calculate Truth Score');
 
     // Step 6: Generate final analysis
-    console.time('⏱️  Step 6: Generate Final Analysis');
+    console.time('Step 6: Generate Final Analysis');
     showProgress('Generating comprehensive fact-check...');
 
     const prompt = buildFactCheckPrompt(claim, pubmedResults, simplified, truthScore);
 
     const session = await getLanguageModelSession();
     const finalAnalysis = await session.prompt(prompt);
-    console.timeEnd('⏱️  Step 6: Generate Final Analysis');
+    console.timeEnd('Step 6: Generate Final Analysis');
 
     // Translate if needed
     let translatedAnalysis = finalAnalysis;
     if (language !== 'en') {
-      console.time('⏱️  Step 7: Translation');
+      console.time('Step 7: Translation');
       showProgress(`Translating to ${language === 'es' ? 'Spanish' : 'Japanese'}...`);
       translatedAnalysis = await translateText(finalAnalysis, language);
-      console.timeEnd('⏱️  Step 7: Translation');
+      console.timeEnd('Step 7: Translation');
     }
 
     // Calculate total time
     const totalTime = ((performance.now() - startTime) / 1000).toFixed(2);
     console.log('='.repeat(80));
-    console.log(`⏱️  TOTAL TIME: ${totalTime}s`);
+    console.log(`TOTAL TIME: ${totalTime}s`);
     console.log('='.repeat(80) + '\n');
 
     // Display results
@@ -1122,7 +1189,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       console.warn('Chrome AI not fully available:', availability);
     } else {
-      console.log('✓ Chrome AI is available and ready');
+      console.log('Chrome AI is available and ready');
     }
   } catch (error) {
     console.error('Error checking Chrome AI availability:', error);
