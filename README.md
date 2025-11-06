@@ -1,5 +1,5 @@
 # Health Fact Checker Chrome Extension
-
+Click on the image to watch demo on YouTube.
 [![Watch the demo](https://img.youtube.com/vi/9vgYFDS_cA0/maxresdefault.jpg)](https://youtu.be/9vgYFDS_cA0?si=5n0SFMGKZQfOFD0w)
 
 ## Installation Instructions
