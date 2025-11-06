@@ -8,7 +8,7 @@
    - Open Chrome and go to `chrome://extensions/`
    - Enable "Developer mode" (toggle in top-right)
    - Click "Load unpacked"
-   - Select your `health-fact-checker` folder
+   - Select your `extensions` folder
 
 3. **Enable Chrome AI** :
    - Go to `chrome://flags/`
